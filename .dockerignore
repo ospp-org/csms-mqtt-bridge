@@ -1,0 +1,40 @@
+# Source control
+.git
+.gitignore
+.github
+
+# Editor / IDE
+.vscode
+.idea
+.editorconfig
+
+# Build artifacts (rebuilt inside container)
+node_modules
+dist
+coverage
+test-results
+*.tsbuildinfo
+
+# Logs and caches
+*.log
+.npm
+.eslintcache
+
+# Env / secrets — never bake into image
+.env
+.env.*
+!.env.example
+
+# Test config (not needed at runtime)
+vitest.config.ts
+vitest.config.js
+
+# Misc
+.DS_Store
+*.swp
+*.swo
+
+# Docs (not needed at runtime; LICENSE is copied explicitly in Dockerfile)
+README.md
+CHANGELOG.md
+docs
