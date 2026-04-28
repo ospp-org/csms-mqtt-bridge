@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `src/index.ts` startup log: replaced stale `phase: '0.5'` field with
+  `version: <package-version>` read from `package.json` at module load
+  (ESM-safe `import.meta.url` + `readFileSync`). The phase tag was
+  introduced in `a837492` (Phase 0.5) and never updated through Phases
+  0.6, 0.7a, 0.7a-1, 0.7b, 0.7c — operators were seeing a stale marker.
+  Version field now auto-updates with each release.
+
+### Internal
+
+- Removed unused `export` keyword from 5 module-internal symbols
+  (`handleInbound` in `mqtt.ts`; `Qos`, `EnvelopeVersion`,
+  `CreateRedisBridgeOpts` in `redis.ts`; `BridgeState` in `state.ts`).
+  All five were used inside their own module but never imported by
+  another module — the `export` was unused API surface. No public API
+  change. Tests exercise `handleInbound` indirectly via the
+  `handleMessage` override and required no changes.
+
 ### Documentation
 
 - README: removed broken placeholder link to upstream `mqtt.js` issue

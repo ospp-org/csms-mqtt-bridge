@@ -4,7 +4,7 @@ import type { Logger } from 'pino';
 import type { Config } from './config.js';
 import { state } from './state.js';
 
-export type Qos = 0 | 1 | 2;
+type Qos = 0 | 1 | 2;
 
 /**
  * Schema version for envelopes flowing across the bridge ↔ csms-server
@@ -13,7 +13,7 @@ export type Qos = 0 | 1 | 2;
  * authoritative contract is documented in docs/REDIS-QUEUE-CONTRACT.md.
  */
 export const ENVELOPE_VERSION = 1 as const;
-export type EnvelopeVersion = typeof ENVELOPE_VERSION;
+type EnvelopeVersion = typeof ENVELOPE_VERSION;
 
 export interface IncomingEnvelope {
   version: EnvelopeVersion;
@@ -145,7 +145,7 @@ const wireLifecycleEvents = (redis: Redis, logger: Logger): void => {
   });
 };
 
-export interface CreateRedisBridgeOpts {
+interface CreateRedisBridgeOpts {
   /** Inject a pre-built ioredis client (tests). When provided, no listeners are wired. */
   client?: Redis;
   /** Logger for lifecycle events. Required when `client` is not provided. */

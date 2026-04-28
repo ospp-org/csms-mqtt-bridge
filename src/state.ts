@@ -1,4 +1,4 @@
-export interface BridgeState {
+interface BridgeState {
   mqttConnected: boolean;
   redisConnected: boolean;
   lastMessageReceivedAt: Date | null;

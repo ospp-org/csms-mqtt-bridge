@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import pino from 'pino';
 
 import type { Config } from './config.js';
@@ -5,6 +9,13 @@ import { ConfigError, loadConfig, sanitizedConfigForLog } from './config.js';
 import { startMqttClient } from './mqtt.js';
 import type { RedisBridge } from './redis.js';
 import { createRedisBridge } from './redis.js';
+
+// Resolve package.json relative to the compiled entrypoint so the same path
+// works for `node dist/index.js` (dist/../package.json) and `tsx src/index.ts`
+// (src/../package.json). Read once at module load — package.json is part of
+// the deployed artifact; if it's missing, we fail to start, which is correct.
+const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '../package.json');
+const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version: string };
 
 const loadConfigOrExit = (): Config => {
   try {
@@ -35,7 +46,10 @@ if (!config.MQTT_REJECT_UNAUTHORIZED) {
   );
 }
 
-logger.info({ phase: '0.5', config: sanitizedConfigForLog(config) }, 'csms-mqtt-bridge starting');
+logger.info(
+  { version: pkg.version, config: sanitizedConfigForLog(config) },
+  'csms-mqtt-bridge starting',
+);
 
 // Ordered startup:
 //  1. Build the Redis bridge first (lazyConnect) — both MQTT inbound (push to

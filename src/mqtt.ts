@@ -93,7 +93,7 @@ export const buildClientOptions = (config: Config): IClientOptions => ({
  * Throws if the Redis push fails — caller MUST translate that into a no-ack
  * so the broker re-delivers on reconnect / share-group rebalance.
  */
-export const handleInbound = async (
+const handleInbound = async (
   packet: IPublishPacket,
   redis: RedisBridge,
   logger: Logger,
