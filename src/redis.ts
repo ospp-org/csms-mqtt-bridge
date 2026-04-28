@@ -4,7 +4,17 @@ import type { Config } from './config.js';
 
 export type Qos = 0 | 1 | 2;
 
+/**
+ * Schema version for envelopes flowing across the bridge ↔ csms-server
+ * Redis-queue boundary. Incompatible schema changes MUST bump this; consumers
+ * reject unknown versions cleanly (see parseOutgoingEnvelope below). The
+ * authoritative contract is documented in docs/REDIS-QUEUE-CONTRACT.md.
+ */
+export const ENVELOPE_VERSION = 1 as const;
+export type EnvelopeVersion = typeof ENVELOPE_VERSION;
+
 export interface IncomingEnvelope {
+  version: EnvelopeVersion;
   topic: string;
   stationId: string;
   payload: string;
@@ -15,6 +25,7 @@ export interface IncomingEnvelope {
 }
 
 export interface OutgoingEnvelope {
+  version: EnvelopeVersion;
   topic: string;
   payload: string;
   qos: Qos;
@@ -36,6 +47,16 @@ const parseOutgoingEnvelope = (raw: string): OutgoingEnvelope => {
     throw new Error('outgoing envelope is not an object');
   }
   const obj = parsed as Record<string, unknown>;
+  if (obj['version'] === undefined) {
+    throw new Error(
+      `outgoing envelope missing "version" field; expected ${ENVELOPE_VERSION.toString()}`,
+    );
+  }
+  if (obj['version'] !== ENVELOPE_VERSION) {
+    throw new Error(
+      `outgoing envelope version mismatch: got ${JSON.stringify(obj['version'])}, expected ${ENVELOPE_VERSION.toString()}`,
+    );
+  }
   if (typeof obj['topic'] !== 'string' || obj['topic'].length === 0) {
     throw new Error('outgoing envelope missing string "topic"');
   }
@@ -46,6 +67,7 @@ const parseOutgoingEnvelope = (raw: string): OutgoingEnvelope => {
     throw new Error('outgoing envelope "qos" must be 0, 1, or 2');
   }
   const envelope: OutgoingEnvelope = {
+    version: ENVELOPE_VERSION,
     topic: obj['topic'],
     payload: obj['payload'],
     qos: obj['qos'],

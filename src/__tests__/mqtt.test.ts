@@ -384,6 +384,7 @@ describe('startMqttClient — inbound', () => {
     expect(fakeRedis.pushed).toHaveLength(1);
     const env = fakeRedis.pushed[0];
     expect(env).toBeDefined();
+    expect(env?.version).toBe(1);
     expect(env?.topic).toBe('ospp/v1/stations/stn_00000001/to-server');
     expect(env?.stationId).toBe('stn_00000001');
     expect(env?.qos).toBe(1);
@@ -427,6 +428,7 @@ describe('startMqttClient — outbound loop', () => {
     const fakeClient = makeFakeClient();
     const fakeRedis = makeFakeRedis([
       {
+        version: 1,
         topic: 'ospp/v1/stations/stn_00000001/to-station',
         payload: Buffer.from('{"action":"BootNotificationResponse"}').toString('base64'),
         qos: 1,

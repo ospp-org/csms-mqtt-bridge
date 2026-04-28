@@ -14,6 +14,7 @@ import type { Logger } from 'pino';
 
 import type { Config } from './config.js';
 import type { IncomingEnvelope, OutgoingEnvelope, RedisBridge } from './redis.js';
+import { ENVELOPE_VERSION } from './redis.js';
 import { state } from './state.js';
 
 export const SHARED_SUB_TOPIC = '$share/ospp-servers/ospp/v1/stations/+/to-server';
@@ -95,6 +96,7 @@ const handleInbound = async (
   state.lastMessageReceivedAt = now;
 
   const envelope: IncomingEnvelope = {
+    version: ENVELOPE_VERSION,
     topic,
     stationId,
     payload: payload.toString('base64'),
