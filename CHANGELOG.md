@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+## [0.1.3] - 2026-04-28
+
+### Documentation
+
+- README: prominent caveat at the top of the "TLS SNI when connecting via
+  an internal hostname" section noting that `MQTT_SERVERNAME` is currently
+  ignored by `mqtt.js@5.15.1` due to an upstream bug at `connect/tls.js:28`
+  (`opts.servername = opts.host` runs unconditionally for hostname targets,
+  overwriting the user-provided value). Documents the Docker network alias
+  workaround — set up an intra-Docker alias matching the broker cert SAN so
+  the connect URL host already equals the SAN, and SNI defaulting to that
+  host validates correctly without needing `MQTT_SERVERNAME`.
+- Feature itself unchanged from 0.1.1. The variable is still plumbed
+  through this bridge correctly; it will start working the day the
+  upstream fix lands, with no code change required here. Kept as a
+  dormant, forward-compatible knob rather than reverted.
+
+### Notes
+
+- No code changes. Documentation-only release for visibility into the
+  upstream limitation discovered during csms-server compose integration
+  (Phase 0.7b).
+
 ## [0.1.2] - 2026-04-28
 
 ### Changed
@@ -207,7 +230,8 @@ that produces this image.
   `csms-uat-server-1`) — provisioning happens out-of-band via the
   `ospp:generate-server-cert` artisan command in csms-server (Phase 0.6).
 
-[Unreleased]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ospp-org/csms-mqtt-bridge/releases/tag/v0.1.0

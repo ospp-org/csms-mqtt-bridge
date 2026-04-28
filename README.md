@@ -186,6 +186,37 @@ required configuration.
 
 ### TLS SNI when connecting via an internal hostname
 
+> ⚠️ **Known limitation (mqtt.js v5.15.1)**: `MQTT_SERVERNAME` is currently
+> ignored by `mqtt.js` due to an upstream bug at `connect/tls.js:28`
+> (`opts.servername = opts.host` runs unconditionally for hostname targets,
+> overwriting the user-provided `servername`). The variable is plumbed
+> through correctly by this bridge — it will start working the day the
+> upstream fix lands, with no code change required here. Tracked at
+> [mqttjs/MQTT.js issue #N](https://github.com/mqttjs/MQTT.js/issues/N).
+>
+> **Workaround until upstream is fixed**: use a Docker network alias so the
+> connect URL host already matches the broker certificate SAN. Then SNI =
+> connect host = SAN entry, and the handshake validates without needing
+> `MQTT_SERVERNAME` at all.
+>
+> ```yaml
+> # docker-compose.yml — broker side advertises the public hostname as alias
+> services:
+>   emqx:
+>     networks:
+>       csms-network:
+>         aliases:
+>           - mqtt-uat.onestoppay.ro  # match broker cert SAN
+>
+>   mqtt-bridge:
+>     environment:
+>       MQTT_BROKER_URL: mqtts://mqtt-uat.onestoppay.ro:8883  # alias resolves intra-Docker
+> ```
+>
+> The alias is intra-Docker only — no public DNS hop, no traffic leaves the
+> compose network. mqtt.js still defaults SNI to the URL host, but now that
+> host is the SAN-covered hostname, so validation succeeds.
+
 When the bridge connects to the broker over an internal hostname that the
 broker certificate doesn't cover — typically a Docker network alias like
 `emqx` paired with a public-domain cert (`mqtt-uat.onestoppay.ro`) — the
