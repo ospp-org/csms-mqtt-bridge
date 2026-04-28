@@ -19,7 +19,8 @@ roadmap.
 | 0.4   | MQTT client wrapper: persistent mTLS, MQTT 5, shared subscription, LWT, reconnect logging, outbound BLPOP loop | done   |
 | 0.5   | At-least-once delivery — manual-ack inbound + BLMOVE outbound + startup replay                                 | done   |
 | 0.6   | Server cert provisioning (artisan command in `csms-server`)                                                    | next   |
-| 0.7+  | Sidecar deployment, Horizon worker integration, tests, decommissioning the legacy webhook path                 | —      |
+| 0.7a  | GHCR auto-publish (multi-arch Docker image on `v*.*.*` tag push)                                               | done   |
+| 0.7b+ | csms-server compose integration, Horizon worker, tests, decommissioning the legacy webhook path                | —      |
 
 ## Architecture
 
@@ -142,6 +143,45 @@ The Dockerfile is multi-stage (deps / builder / runtime) on `node:22-alpine`.
 Final image is ~178 MB (the Node 22 runtime alone is ~150 MB; getting below
 that would require a different runtime). `tini` handles PID 1 signals so
 SIGTERM triggers a graceful shutdown.
+
+## Deploying
+
+Tagged releases publish a multi-arch image (`linux/amd64` + `linux/arm64`)
+to GitHub Container Registry. The publish runs from
+[`.github/workflows/release.yml`](./.github/workflows/release.yml) on every
+`v*.*.*` tag push.
+
+```bash
+# Latest stable
+docker pull ghcr.io/ospp-org/csms-mqtt-bridge:latest
+
+# Pin to a specific release
+docker pull ghcr.io/ospp-org/csms-mqtt-bridge:0.1.0
+
+# Pin to a specific commit (e.g. for a hotfix verification)
+docker pull ghcr.io/ospp-org/csms-mqtt-bridge:sha-3fb03ad
+```
+
+### Available tags
+
+| Pattern       | Example       | Stability                                                |
+| ------------- | ------------- | -------------------------------------------------------- |
+| `latest`      | `latest`      | Highest published semver. Convenient; **don't pin in production**. |
+| `vX.Y.Z`      | `v0.1.0`      | Exact git tag. Immutable.                                |
+| `X.Y.Z`       | `0.1.0`       | Same image as `vX.Y.Z`, no `v` prefix.                   |
+| `X.Y`         | `0.1`         | Latest patch in the X.Y line. Rolls forward on new patches. |
+| `sha-<short>` | `sha-3fb03ad` | Tag's commit SHA (7 chars). Immutable.                   |
+
+The image carries SLSA build provenance and an SBOM attached at push time.
+Inspect manifest, platforms, and labels with:
+
+```bash
+docker buildx imagetools inspect ghcr.io/ospp-org/csms-mqtt-bridge:0.1.0
+```
+
+Run as you would the locally-built image — see the `docker run` example
+above and the [environment variables](#environment-variables) table for
+required configuration.
 
 ## Repository layout
 

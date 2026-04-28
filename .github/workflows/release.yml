@@ -1,0 +1,85 @@
+name: Release
+
+# Triggered by pushing a semver tag (e.g. v0.1.0) to GitHub. Builds a
+# multi-arch Docker image (linux/amd64 + linux/arm64) and publishes it to
+# ghcr.io/ospp-org/csms-mqtt-bridge with semver + sha + latest tags.
+#
+# Security note: no run: steps consume untrusted input. All ${{ ... }}
+# expressions feed into action inputs (which the actions sanitize) or
+# OCI label values. github.actor is GitHub-validated; secrets.GITHUB_TOKEN
+# is the workflow-scoped token (no PAT required for the public ospp-org
+# repo's GHCR).
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    name: Build and publish multi-arch image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Workflow trigger gates on v*.*.* tags from main, so latest=true is
+          # safe here. is_default_branch evaluates false on tag events, so it
+          # cannot be used as the latest gate.
+          flavor: |
+            latest=true
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=OSPP MQTT bridge — Node.js sidecar for CSMS servers
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true

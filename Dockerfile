@@ -26,6 +26,14 @@ FROM ${NODE_IMAGE} AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
+# OCI image labels — auto-link image to the source repo on the GHCR UI and
+# carry license/description metadata even for locally-built images. The
+# release workflow's docker/metadata-action overrides these at push time
+# with the same values plus auto-derived created/revision labels.
+LABEL org.opencontainers.image.source="https://github.com/ospp-org/csms-mqtt-bridge" \
+      org.opencontainers.image.description="OSPP MQTT bridge — Node.js sidecar for CSMS servers" \
+      org.opencontainers.image.licenses="MIT"
+
 # tini for proper signal handling (PID 1) — graceful SIGTERM
 RUN apk add --no-cache tini
 

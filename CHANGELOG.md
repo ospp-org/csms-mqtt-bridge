@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.1.0] - 2026-04-28
+
+Initial OSPP MQTT bridge release. Covers AUDIT v2 phases 0.1 through 0.7a —
+repo bootstrap, typed env-var loader, MQTT 5 client wrapper with mTLS and
+shared subscriptions, Redis bridge with at-least-once delivery (manual-ack
+inbound + BLMOVE outbound + startup replay), and the GHCR publish workflow
+that produces this image.
+
+### Added (Phase 0.7a — release tooling)
+
+- `.github/workflows/release.yml` — multi-arch (`linux/amd64` +
+  `linux/arm64`) Docker image publish to
+  `ghcr.io/ospp-org/csms-mqtt-bridge` on every `v*.*.*` tag push. Tags
+  emitted via `docker/metadata-action`: `vX.Y.Z`, `X.Y.Z`, `X.Y`,
+  `sha-<short>`, and `latest`. SLSA provenance + SBOM attached at push
+  time; build cached on the GitHub Actions cache backend (`type=gha`).
+- Dockerfile OCI labels
+  (`org.opencontainers.image.{source,description,licenses}`) baked into
+  the runtime stage so locally-built images carry the same metadata as
+  the published one. The release workflow's metadata-action overrides
+  the same keys at push time and adds auto-derived `created` /
+  `revision` labels.
+- README "Deploying" section listing the published tag patterns and the
+  `docker buildx imagetools inspect` recipe for verifying the multi-arch
+  manifest.
+
 ### Added (Phase 0.5 — at-least-once delivery)
 
 - Inbound manual ack via `client.handleMessage` override: PUBACK to the
@@ -63,7 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `.env.example` `REDIS_URL` documented with `redis://[:password]@host`
   format; csms-server's compose runs Redis with `--requirepass`.
 
-### Added
+### Added (Phase 0.3–0.4 — config loader + MQTT client wrapper)
 
 - `src/config.ts` — typed env-var loader using `zod` v4. Required vars
   (`MQTT_BROKER_URL`, `MQTT_CLIENT_ID`, `MQTT_*_PATH`, `REDIS_URL`) are
@@ -107,7 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tsconfig.build.json` — split out from `tsconfig.json` so the build excludes
   `*.test.ts` and `__tests__/` while typecheck still covers them.
 
-### Changed
+### Changed (Phase 0.3–0.4)
 
 - `src/index.ts` wires up config → Redis bridge → MQTT bridge with explicit
   shutdown handling: SIGTERM/SIGINT call `mqtt.stop()` then `redis.quit()`,
@@ -123,13 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added: `zod ^4.3.6` (config validation).
 
-## [0.1.0] - 2026-04-28
-
-Initial scaffold per AUDIT v2 §0.2 (Phase 0 work item: Repo bootstrap).
-No business logic yet — Phase 0.3-0.5 will add config loader, MQTT client
-wrapper, and Redis bridge on top of this foundation.
-
-### Added
+### Added (Phase 0.2 — scaffold)
 
 - `package.json` with strict dependency set: `mqtt@^5`, `ioredis@^5`,
   `pino@^9`, `prom-client@^15` (runtime); `typescript@^5`, `vitest@^2`,
@@ -154,7 +176,8 @@ wrapper, and Redis bridge on top of this foundation.
 ### Notes
 
 - Phase 0.1 POC validated `mqtt@5` + Node 22+ against the UAT EMQX broker
-  via mTLS. Round-trip latency was ~469ms, no compatibility issues observed.
+  via mTLS. Round-trip latency was ~469 ms, no compatibility issues
+  observed.
 - Server certificate convention `csms-<env>-server-<N>` (e.g.
   `csms-uat-server-1`) — provisioning happens out-of-band via the
   `ospp:generate-server-cert` artisan command in csms-server (Phase 0.6).
