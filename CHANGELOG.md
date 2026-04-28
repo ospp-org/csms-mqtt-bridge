@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `src/config.ts` — typed env-var loader using `zod` v4. Required vars
+  (`MQTT_BROKER_URL`, `MQTT_CLIENT_ID`, `MQTT_*_PATH`, `REDIS_URL`) are
+  validated at startup with file-existence checks for cert/key/CA paths.
+  Optional vars carry sensible defaults (`LOG_LEVEL`, `METRICS_PORT`,
+  `SHUTDOWN_TIMEOUT_MS`, MQTT keepalive/reconnect/connect timings, Redis
+  queue keys + BLPOP timeout).
+- `ConfigError` aggregates all validation issues into a single error so
+  operators see every problem on first run instead of fixing them one at
+  a time.
+- `redactUrl` + `sanitizedConfigForLog` — log helpers that omit the private
+  key path and redact userinfo from URL fields.
+- `src/__tests__/config.test.ts` — 36 vitest cases covering happy paths,
+  missing-required, invalid URL/number/enum/boolean, file existence,
+  multi-issue reporting, redaction, and snapshot sanitization.
+- `.env.example` — documented placeholder values for every variable.
+- `.prettierignore` — keeps `docs/`, `CHANGELOG.md`, and lockfile out of
+  Prettier's scope.
+- `tsconfig.build.json` — split out from `tsconfig.json` so the build excludes
+  `*.test.ts` and `__tests__/` while typecheck still covers them.
+
+### Changed
+
+- `src/index.ts` now loads config first, exits non-zero with a structured
+  fatal log if validation fails, otherwise initializes the main logger from
+  `LOG_LEVEL` and logs the sanitized config snapshot.
+- `package.json` `build` script now uses `tsc -p tsconfig.build.json`.
+- `Dockerfile` builder stage copies both tsconfig files.
+- `README.md` env-var section replaced with full required/optional tables.
+
 ## [0.1.0] - 2026-04-28
 
 Initial scaffold per AUDIT v2 §0.2 (Phase 0 work item: Repo bootstrap).

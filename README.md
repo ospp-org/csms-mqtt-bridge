@@ -49,24 +49,42 @@ translation and resilience (reconnect, backoff, in-flight bookkeeping).
 - [`ioredis`](https://github.com/redis/ioredis) — Redis client
 - [`pino`](https://github.com/pinojs/pino) — structured logging
 - [`prom-client`](https://github.com/siimon/prom-client) — Prometheus metrics
+- [`zod`](https://zod.dev/) v4 — env-var validation
 - [`vitest`](https://vitest.dev/) — tests
 - ESLint flat config + Prettier
 
 ## Environment variables
 
-The full set is defined and validated by `src/config.ts` in Phase 0.3.
-Placeholder list — final names may change:
+Defined and validated by [`src/config.ts`](./src/config.ts). All required
+values are checked at startup; any failure exits the process with a single
+structured error listing every issue. See [`.env.example`](./.env.example)
+for a copy-paste starting point.
 
-| Name              | Required | Description                                             |
-|-------------------|----------|---------------------------------------------------------|
-| `MQTT_BROKER_URL` | yes      | e.g. `mqtts://mqtt-uat.onestoppay.ro:8884`              |
-| `MQTT_CLIENT_ID`  | yes      | Server CN, e.g. `csms-uat-server-1`                     |
-| `MQTT_CERT_PATH`  | yes      | PEM path to server cert                                 |
-| `MQTT_KEY_PATH`   | yes      | PEM path to server private key                          |
-| `MQTT_CA_PATH`    | yes      | PEM path to OneStopPay Root CA (validates broker cert)  |
-| `REDIS_URL`       | yes      | e.g. `redis://csms-redis:6379/0`                        |
-| `LOG_LEVEL`       | no       | `trace` \| `debug` \| `info` \| `warn` \| `error` (default `info`) |
-| `METRICS_PORT`    | no       | Prometheus scrape port (default `9090`)                 |
+### Required
+
+| Name              | Description                                                              | Example                               |
+| ----------------- | ------------------------------------------------------------------------ | ------------------------------------- |
+| `MQTT_BROKER_URL` | Broker URL incl. protocol.                                               | `mqtts://mqtt-uat.onestoppay.ro:8884` |
+| `MQTT_CLIENT_ID`  | Sidecar clientid; must match CN of the server certificate.               | `csms-uat-server-1`                   |
+| `MQTT_CERT_PATH`  | PEM path to the server certificate (signed by Station CA).               | `/run/secrets/server-cert.pem`        |
+| `MQTT_KEY_PATH`   | PEM path to the server private key (mode 0600). Never logged.            | `/run/secrets/server-key.pem`         |
+| `MQTT_CA_PATH`    | PEM path to the chain validating the broker cert (Station CA + Root CA). | `/run/secrets/server-chain.pem`       |
+| `REDIS_URL`       | Redis URL incl. protocol; credentials in the URL are redacted from logs. | `redis://csms-redis:6379/0`           |
+
+### Optional (defaults shown)
+
+| Name                       | Default         | Description                                                                                                                                                           |
+| -------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MQTT_REJECT_UNAUTHORIZED` | `true`          | Validate broker cert against `MQTT_CA_PATH`. **Do not set to `false` outside an ephemeral sandbox.** Accepted: `true`/`1`/`yes`, `false`/`0`/`no` (case-insensitive). |
+| `LOG_LEVEL`                | `info`          | Pino level: `trace` \| `debug` \| `info` \| `warn` \| `error` \| `fatal`.                                                                                             |
+| `METRICS_PORT`             | `9090`          | Prometheus exporter port (1–65535).                                                                                                                                   |
+| `SHUTDOWN_TIMEOUT_MS`      | `10000`         | Graceful shutdown deadline in ms.                                                                                                                                     |
+| `MQTT_KEEPALIVE`           | `60`            | MQTT keepalive interval, in seconds.                                                                                                                                  |
+| `MQTT_RECONNECT_PERIOD`    | `5000`          | MQTT reconnect base period in ms (mqtt.js layers exponential backoff + jitter on top).                                                                                |
+| `MQTT_CONNECT_TIMEOUT`     | `30000`         | Initial connect deadline in ms.                                                                                                                                       |
+| `REDIS_QUEUE_INCOMING`     | `mqtt:incoming` | Redis list key for inbound messages from broker → server.                                                                                                             |
+| `REDIS_QUEUE_OUTGOING`     | `mqtt:outgoing` | Redis list key for outbound messages from server → broker.                                                                                                            |
+| `REDIS_BLPOP_TIMEOUT_SEC`  | `5`             | BLPOP block timeout when polling the outgoing queue, in seconds.                                                                                                      |
 
 ## Build & run
 
@@ -102,9 +120,10 @@ docker run --rm \
   csms-mqtt-bridge:dev
 ```
 
-The Dockerfile is multi-stage (deps / builder / runtime) targeting a final
-image under 100 MB on `node:22-alpine`. `tini` handles PID 1 signals so SIGTERM
-triggers a graceful shutdown.
+The Dockerfile is multi-stage (deps / builder / runtime) on `node:22-alpine`.
+Final image is ~178 MB (the Node 22 runtime alone is ~150 MB; getting below
+that would require a different runtime). `tini` handles PID 1 signals so
+SIGTERM triggers a graceful shutdown.
 
 ## Repository layout
 

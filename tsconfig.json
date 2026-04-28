@@ -35,6 +35,8 @@
     "sourceMap": true,
     "removeComments": false,
 
+    "noEmit": true,
+
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],

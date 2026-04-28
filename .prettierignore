@@ -1,0 +1,8 @@
+dist
+coverage
+node_modules
+package-lock.json
+
+# External docs (mirror copies) — preserved as-authored.
+docs
+CHANGELOG.md

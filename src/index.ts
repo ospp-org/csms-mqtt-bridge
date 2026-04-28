@@ -1,13 +1,33 @@
 import pino from 'pino';
 
+import type { Config } from './config.js';
+import { ConfigError, loadConfig, sanitizedConfigForLog } from './config.js';
+
+const loadConfigOrExit = (): Config => {
+  try {
+    return loadConfig();
+  } catch (err) {
+    // Bootstrap logger — no config-driven level yet; log fatal to stderr and exit.
+    const bootstrapLogger = pino({ level: 'fatal', base: { service: 'csms-mqtt-bridge' } });
+    if (err instanceof ConfigError) {
+      bootstrapLogger.fatal({ issues: err.issues }, err.message);
+    } else {
+      bootstrapLogger.fatal({ err }, 'unexpected error during config load');
+    }
+    process.exit(1);
+  }
+};
+
+const config = loadConfigOrExit();
+
 const logger = pino({
-  level: process.env['LOG_LEVEL'] ?? 'info',
+  level: config.LOG_LEVEL,
   base: { service: 'csms-mqtt-bridge' },
 });
 
 logger.info(
-  { phase: '0.2', status: 'placeholder' },
-  'csms-mqtt-bridge starting (placeholder, Phase 0.3 not implemented yet)',
+  { phase: '0.3', config: sanitizedConfigForLog(config) },
+  'csms-mqtt-bridge starting (Phase 0.3 — config validated; MQTT client wires up in 0.4)',
 );
 
 // Keep the event loop alive so SIGTERM can be observed; replaced by the MQTT
