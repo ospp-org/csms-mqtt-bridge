@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (Phase 0.5 — at-least-once delivery)
+
+- Inbound manual ack via `client.handleMessage` override: PUBACK to the
+  broker fires only after the inbound envelope is pushed to
+  `mqtt:incoming`. On Redis failure the bridge calls back with an error,
+  mqtt.js skips the PUBACK, and the broker re-delivers on session
+  reconnect. Garbage topics are still acked-and-dropped (don't redeliver
+  malformed messages forever).
+- Outbound reliable consumption via `BLMOVE` into a new `mqtt:processing`
+  list. After PUBACK the raw JSON is removed with `LREM`; if the bridge
+  crashes between BLMOVE and PUBACK, the envelope stays in
+  `mqtt:processing` and gets replayed on the next startup's first MQTT
+  connect.
+- `replayProcessing()` drains stuck items at startup. Successfully
+  republished items are acked; failed publishes stay in processing for
+  the next attempt. Malformed entries are LREM'd to keep the queue from
+  growing unboundedly with garbage.
+- `REDIS_QUEUE_PROCESSING` env var (default `mqtt:processing`).
+- Redis lifecycle: `redis.start()` for explicit lazy connect, ioredis
+  `retryStrategy` with exponential-backoff-plus-jitter capped at 30 s,
+  structured logs on every state transition (`connect`/`ready`/
+  `reconnecting`/`error`/`close`/`end`), plus a new
+  `state.redisConnected` flag for future health checks.
+- `src/__tests__/redis.test.ts` extended to cover `start()`,
+  `pushIncoming`, `popOutgoingReliable` (BLMOVE + ack + malformed-entry
+  cleanup), `replayProcessing` (parsing + LREM of bad items), and
+  `quit()` (tolerating already-closed errors).
+- `src/__tests__/mqtt.test.ts` updated for the new manual-ack path:
+  `handleMessage` acks on success, propagates the error on Redis
+  failure, and acks-and-drops on unrecognized topics. Outbound tests
+  exercise BLMOVE + ack flow plus startup replay (idempotent across
+  reconnects, no-op on empty processing, stuck-on-publish-failure path).
+- Worker compatibility checklist in `docs/REDIS-QUEUE-CONTRACT.md`
+  expanded with the at-least-once reality: csms-server's Phase 0.8
+  worker MUST dedupe on `messageId` and MUST NOT touch
+  `mqtt:processing`.
+- Redis server requirements section in `docs/REDIS-QUEUE-CONTRACT.md` —
+  version ≥ 6.2, AOF persistence, `noeviction` recommended (with note
+  about UAT's `allkeys-lru` posture and the monitoring follow-up that
+  Phase C will add).
+
+### Changed (Phase 0.5)
+
+- `RedisBridge` interface: `popOutgoing()` removed; replaced by
+  `popOutgoingReliable()` returning `{ envelope, raw, ack }`. Callers
+  invoke `ack()` only after the publish is confirmed by the broker.
+- `createRedisBridge(config, client?)` signature widened to
+  `createRedisBridge(config, opts?)` with `opts: { client?, logger? }`.
+  The logger is wired up on internally-constructed clients to surface
+  Redis lifecycle events.
+- `src/index.ts` startup is now ordered: build Redis bridge → `await
+  redis.start()` → start MQTT (which triggers replay on first connect).
+  Shutdown is the reverse, bounded by `SHUTDOWN_TIMEOUT_MS`.
+- `.env.example` `REDIS_URL` documented with `redis://[:password]@host`
+  format; csms-server's compose runs Redis with `--requirepass`.
+
 ### Added
 
 - `src/config.ts` — typed env-var loader using `zod` v4. Required vars

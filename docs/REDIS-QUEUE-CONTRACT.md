@@ -34,19 +34,39 @@ same module.
 
 ## 2. Queue keys
 
-| Key             | Direction                  | Producer            | Consumer            |
-| --------------- | -------------------------- | ------------------- | ------------------- |
-| `mqtt:incoming` | broker → bridge → worker   | bridge (LPUSH)      | csms-server worker  |
-| `mqtt:outgoing` | worker → bridge → broker   | csms-server worker  | bridge (BLPOP)      |
+| Key               | Direction                | Producer            | Consumer                                      |
+| ----------------- | ------------------------ | ------------------- | --------------------------------------------- |
+| `mqtt:incoming`   | broker → bridge → worker | bridge (LPUSH)      | csms-server worker (BRPOP for FIFO)           |
+| `mqtt:outgoing`   | worker → bridge → broker | csms-server worker  | bridge (BLMOVE → `mqtt:processing`)           |
+| `mqtt:processing` | bridge-internal          | bridge (BLMOVE dst) | bridge (LREM after PUBACK; LRANGE on startup) |
 
-Keys are configurable via `REDIS_QUEUE_INCOMING` and
-`REDIS_QUEUE_OUTGOING` env vars on the bridge side; csms-server's worker
-must read the same names from its config.
+Keys are configurable via `REDIS_QUEUE_INCOMING`, `REDIS_QUEUE_OUTGOING`,
+and `REDIS_QUEUE_PROCESSING` env vars on the bridge side; csms-server's
+worker must read the same names for the first two from its config.
+`mqtt:processing` is bridge-internal — the worker should NOT touch it.
 
-> **Phase 0.5 note (planned):** the bridge will switch outbound consumption
-> from `BLPOP` to `BLMOVE`-into-`mqtt:processing` for at-least-once
-> delivery semantics across crashes. This contract document will be
-> updated when that lands.
+`mqtt:processing` is currently a singleton, which is correct for
+single-instance deployments. Multi-instance HA (Phase F.7) will need
+per-instance suffixing (e.g. `mqtt:processing:csms-uat-server-1`) so that
+two bridges don't steal each other's in-flight messages.
+
+## 2.1. Redis server requirements
+
+- **Version**: ≥ 6.2 (BLMOVE since 6.2.0). `redis:7.x` is the tested target
+  and matches what `csms-server`'s compose runs.
+- **Auth**: production runs with `--requirepass`; bridges use
+  `redis://[:password]@host:port` URLs. TLS via `rediss://` is supported.
+- **Persistence**: AOF (`--appendonly yes`) is strongly recommended. With
+  AOF, the at-least-once guarantee survives a Redis restart — without it,
+  `mqtt:processing` and `mqtt:outgoing` items disappear on Redis crash and
+  the at-least-once contract degrades to "at-most-once with replay
+  best-effort".
+- **Memory policy**: `noeviction` is recommended for production. `csms-server`
+  currently runs `allkeys-lru` with a 256 MB cap — under sustained memory
+  pressure, queue items COULD be evicted, breaking the at-least-once
+  contract. This is acceptable for UAT volumes (queues normally < 1 MB) but
+  must be tracked: monitoring (Phase C) should alert on queue depth and
+  Redis memory utilization.
 
 ---
 
@@ -191,28 +211,52 @@ loop continues with the next envelope):
 
 ## 5. Reliability semantics
 
-### As of Phase 0.4 (current)
+The bridge is at-least-once in both directions as of Phase 0.5. Workers
+MUST be prepared to see the same `messageId` more than once and dedupe
+via that field if their downstream side effects are not idempotent.
 
-- Inbound: bridge reads from MQTT, calls `redis.lpush('mqtt:incoming', …)`,
-  and PUBACK fires automatically once the user message handler returns.
-  If the LPUSH fails, the bridge logs an error and the message is acked
-  anyway — at-most-once at the broker boundary, **at-most-once** end to
-  end.
-- Outbound: bridge `BLPOP`s and publishes. If the bridge crashes between
-  the BLPOP and a successful PUBACK, the envelope is **lost**.
+### Inbound: broker → bridge → Redis
 
-### Planned for Phase 0.5
+The bridge overrides `client.handleMessage`, so the PUBACK to the broker
+is sent only after `LPUSH mqtt:incoming` resolves. On Redis failure, the
+bridge calls the mqtt.js callback with an error → mqtt.js skips the
+PUBACK → the broker keeps the message and re-delivers it on session
+reconnect (or, for shared subscriptions, redistributes it to another
+group member after session expiry).
 
-- Inbound: override `client.handleMessage` so PUBACK is gated on the
-  Redis push succeeding. On failure, no PUBACK → broker re-delivers
-  on session reconnect or share-group rebalance. **At-least-once.**
-- Outbound: replace `BLPOP` with `BLMOVE 'mqtt:outgoing' 'mqtt:processing'`
-  (atomic). After successful PUBACK, `LREM 'mqtt:processing' 1 <env>`.
-  On bridge restart, scan `mqtt:processing` and re-publish. **At-least-once.**
+A message on an unrecognized topic (failing the
+`^ospp/v1/stations/stn_[a-f0-9]{8,60}/to-server$` regex) is **dropped
+and acked**: re-delivering a malformed topic on every reconnect is worse
+than dropping it. The drop is logged at `warn`.
 
-After Phase 0.5 lands, this section will be updated and the `version`
-field will remain `1` because the wire shape is unchanged — only the
-delivery semantics tighten.
+### Outbound: worker → Redis → bridge → broker
+
+The bridge consumes outbound with `BLMOVE mqtt:outgoing mqtt:processing
+LEFT RIGHT`. Once the broker confirms the publish (PUBACK for QoS 1 /
+PUBCOMP for QoS 2), the bridge removes the same raw JSON string from
+`mqtt:processing` with `LREM mqtt:processing 1 <raw>`.
+
+If the bridge crashes between BLMOVE and a successful PUBACK, the raw
+envelope is still in `mqtt:processing`. On the next startup, the bridge
+calls `LRANGE mqtt:processing 0 -1`, parses each item, and republishes
++ acks. Failed replays stay in `mqtt:processing` for the next attempt.
+
+If the bridge encounters a malformed envelope (during BLMOVE-then-parse
+or during startup replay), it removes the bad raw string from
+`mqtt:processing` (`LREM`) and logs an error. We don't replay garbage
+forever.
+
+### Worker requirements
+
+- **Idempotency**: dedupe processed inbound messages by `messageId`.
+  After a Redis or bridge restart, an envelope that was already pushed
+  to `mqtt:incoming` may appear again if the broker re-delivers (because
+  the bridge crashed before LPUSHing or before acking). The simplest
+  worker pattern is `INSERT ... ON CONFLICT DO NOTHING` keyed on
+  `messageId`, or a Redis `SET messageId NX EX <ttl>` short-circuit.
+- **At-least-once is expected, exactly-once is not provided.** The
+  bridge does not (and cannot, against an MQTT broker) guarantee
+  exactly-once delivery; the worker must tolerate duplicates.
 
 ---
 
@@ -223,10 +267,13 @@ When implementing the consumer side:
 - [ ] Read `mqtt:incoming` with `BRPOP` (FIFO).
 - [ ] Reject any envelope where `version !== 1`.
 - [ ] `base64_decode($payload)` to recover original payload bytes.
-- [ ] Use `messageId` for idempotency in any DB writes.
+- [ ] Use `messageId` for idempotency in any DB writes — the bridge is
+  at-least-once and may re-deliver after a crash. Treat `messageId` as
+  the dedupe key.
 - [ ] Use `receivedAt` for end-to-end latency metrics.
 - [ ] When publishing a response, write to `mqtt:outgoing` with `RPUSH`,
   `version: 1`, base64-encoded payload, and a topic that follows
   `ospp/v1/stations/{stationId}/to-station`.
+- [ ] Do NOT touch `mqtt:processing` — that is bridge-internal.
 - [ ] Don't include MQTT packet IDs or session-specific fields — the
   bridge is responsible for those.

@@ -17,8 +17,8 @@ roadmap.
 | 0.2   | Repo bootstrap (TypeScript strict, ESLint flat, Dockerfile, CI)                                                | done   |
 | 0.3   | Typed env-var loader (`zod` v4) with file-existence + protocol checks; insecure-TLS warning                    | done   |
 | 0.4   | MQTT client wrapper: persistent mTLS, MQTT 5, shared subscription, LWT, reconnect logging, outbound BLPOP loop | done   |
-| 0.5   | Redis bridge — proper validation, retries, manual acks                                                         | next   |
-| 0.6   | Server cert provisioning (artisan command in `csms-server`)                                                    | —      |
+| 0.5   | At-least-once delivery — manual-ack inbound + BLMOVE outbound + startup replay                                 | done   |
+| 0.6   | Server cert provisioning (artisan command in `csms-server`)                                                    | next   |
 | 0.7+  | Sidecar deployment, Horizon worker integration, tests, decommissioning the legacy webhook path                 | —      |
 
 ## Architecture
