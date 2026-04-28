@@ -41,14 +41,26 @@ const port = z.coerce
   .min(1, { message: 'must be ≥ 1' })
   .max(65535, { message: 'must be ≤ 65535' });
 
+const urlWithProtocol = (allowedProtocols: readonly string[], example: string) =>
+  z.url({ message: `must be a valid URL (e.g. ${example})` }).refine(
+    (raw) => {
+      try {
+        return allowedProtocols.includes(new URL(raw).protocol);
+      } catch {
+        return false;
+      }
+    },
+    { message: `must use one of: ${allowedProtocols.join(', ')}` },
+  );
+
 const envSchema = z.object({
   // Required
-  MQTT_BROKER_URL: z.url({ message: 'must be a valid URL (e.g. mqtts://host:8884)' }),
+  MQTT_BROKER_URL: urlWithProtocol(['mqtt:', 'mqtts:'], 'mqtts://host:8884'),
   MQTT_CLIENT_ID: z.string().min(1, { message: 'must be a non-empty string' }),
   MQTT_CERT_PATH: readableFile('MQTT_CERT_PATH'),
   MQTT_KEY_PATH: readableFile('MQTT_KEY_PATH'),
   MQTT_CA_PATH: readableFile('MQTT_CA_PATH'),
-  REDIS_URL: z.url({ message: 'must be a valid URL (e.g. redis://host:6379)' }),
+  REDIS_URL: urlWithProtocol(['redis:', 'rediss:'], 'redis://host:6379'),
 
   // Optional with defaults
   MQTT_REJECT_UNAUTHORIZED: booleanFromEnv.default(true),

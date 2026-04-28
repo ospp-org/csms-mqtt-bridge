@@ -128,6 +128,34 @@ describe('loadConfig — failure paths', () => {
     expect(() => loadConfig({ ...validEnv, REDIS_URL: 'plain-string' })).toThrow(/REDIS_URL/);
   });
 
+  it.each(['http://broker:8884', 'https://broker:8884', 'ws://broker:8884', 'tcp://broker:1883'])(
+    'rejects non-MQTT scheme on MQTT_BROKER_URL: %s',
+    (url) => {
+      expect(() => loadConfig({ ...validEnv, MQTT_BROKER_URL: url })).toThrow(
+        /MQTT_BROKER_URL.*mqtt:|mqtts:/,
+      );
+    },
+  );
+
+  it.each(['mqtt://broker:1883', 'mqtts://broker:8884'])('accepts MQTT scheme: %s', (url) => {
+    const cfg = loadConfig({ ...validEnv, MQTT_BROKER_URL: url });
+    expect(cfg.MQTT_BROKER_URL).toBe(url);
+  });
+
+  it.each(['http://redis:6379', 'tcp://redis:6379', 'amqp://redis:6379'])(
+    'rejects non-Redis scheme on REDIS_URL: %s',
+    (url) => {
+      expect(() => loadConfig({ ...validEnv, REDIS_URL: url })).toThrow(
+        /REDIS_URL.*redis:|rediss:/,
+      );
+    },
+  );
+
+  it.each(['redis://redis:6379', 'rediss://redis:6379/0'])('accepts Redis scheme: %s', (url) => {
+    const cfg = loadConfig({ ...validEnv, REDIS_URL: url });
+    expect(cfg.REDIS_URL).toBe(url);
+  });
+
   it('throws on non-numeric METRICS_PORT', () => {
     expect(() => loadConfig({ ...validEnv, METRICS_PORT: 'abc' })).toThrow(/METRICS_PORT/);
   });

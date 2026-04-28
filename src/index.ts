@@ -25,6 +25,13 @@ const logger = pino({
   base: { service: 'csms-mqtt-bridge' },
 });
 
+if (!config.MQTT_REJECT_UNAUTHORIZED) {
+  logger.warn(
+    { mqttRejectUnauthorized: false },
+    'INSECURE: TLS server cert validation disabled (MQTT_REJECT_UNAUTHORIZED=false). Do not use in production.',
+  );
+}
+
 logger.info(
   { phase: '0.3', config: sanitizedConfigForLog(config) },
   'csms-mqtt-bridge starting (Phase 0.3 — config validated; MQTT client wires up in 0.4)',
