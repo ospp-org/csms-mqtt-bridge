@@ -8,11 +8,18 @@ Aligned with the OSPP spec — see `implementors-guide.md:48,227,626,1150`.
 
 ## Status
 
-`v0.1.0` — initial scaffold. No business logic yet (Phase 0.3-0.5 of the
-parent audit will add config loader, MQTT client wrapper, and Redis bridge).
+Active development. Built incrementally per the parent audit's Phase 0
+roadmap.
 
-Phase 0.1 POC validated the chosen stack (`mqtt@5` + Node 22+) against the UAT
-EMQX broker via mTLS; round-trip latency was ~469ms with no compatibility issues.
+| Phase | Scope                                                                                                          | Status |
+| ----- | -------------------------------------------------------------------------------------------------------------- | ------ |
+| 0.1   | POC — `mqtt@5` + Node 22 + mTLS round-trip against UAT EMQX (~469 ms, zero compatibility issues)               | done   |
+| 0.2   | Repo bootstrap (TypeScript strict, ESLint flat, Dockerfile, CI)                                                | done   |
+| 0.3   | Typed env-var loader (`zod` v4) with file-existence + protocol checks; insecure-TLS warning                    | done   |
+| 0.4   | MQTT client wrapper: persistent mTLS, MQTT 5, shared subscription, LWT, reconnect logging, outbound BLPOP loop | done   |
+| 0.5   | Redis bridge — proper validation, retries, manual acks                                                         | next   |
+| 0.6   | Server cert provisioning (artisan command in `csms-server`)                                                    | —      |
+| 0.7+  | Sidecar deployment, Horizon worker integration, tests, decommissioning the legacy webhook path                 | —      |
 
 ## Architecture
 

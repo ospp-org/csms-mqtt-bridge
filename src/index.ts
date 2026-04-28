@@ -2,6 +2,9 @@ import pino from 'pino';
 
 import type { Config } from './config.js';
 import { ConfigError, loadConfig, sanitizedConfigForLog } from './config.js';
+import { startMqttClient } from './mqtt.js';
+import type { RedisBridge } from './redis.js';
+import { createRedisBridge } from './redis.js';
 
 const loadConfigOrExit = (): Config => {
   try {
@@ -32,21 +35,40 @@ if (!config.MQTT_REJECT_UNAUTHORIZED) {
   );
 }
 
-logger.info(
-  { phase: '0.3', config: sanitizedConfigForLog(config) },
-  'csms-mqtt-bridge starting (Phase 0.3 — config validated; MQTT client wires up in 0.4)',
-);
+logger.info({ phase: '0.4', config: sanitizedConfigForLog(config) }, 'csms-mqtt-bridge starting');
 
-// Keep the event loop alive so SIGTERM can be observed; replaced by the MQTT
-// client connection in Phase 0.4.
-const keepAlive = setInterval(() => {
-  // no-op heartbeat
-}, 60_000);
+const redis: RedisBridge = createRedisBridge(config);
+const mqtt = startMqttClient(config, redis, logger);
 
+let shuttingDown = false;
 const shutdown = (signal: NodeJS.Signals): void => {
-  logger.info({ signal }, 'shutdown');
-  clearInterval(keepAlive);
-  process.exit(0);
+  if (shuttingDown) {
+    logger.warn({ signal }, 'shutdown already in progress, ignoring duplicate signal');
+    return;
+  }
+  shuttingDown = true;
+  logger.info({ signal }, 'shutdown initiated');
+
+  const deadline = setTimeout(() => {
+    logger.error(
+      { timeoutMs: config.SHUTDOWN_TIMEOUT_MS },
+      'shutdown deadline exceeded, forcing exit',
+    );
+    process.exit(1);
+  }, config.SHUTDOWN_TIMEOUT_MS);
+  deadline.unref();
+
+  void (async (): Promise<void> => {
+    try {
+      await mqtt.stop();
+      await redis.quit();
+      logger.info('shutdown complete');
+      process.exit(0);
+    } catch (err) {
+      logger.error({ err }, 'error during shutdown');
+      process.exit(1);
+    }
+  })();
 };
 
 process.on('SIGTERM', () => {

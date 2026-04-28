@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `src/config.ts` — typed env-var loader using `zod` v4. Required vars
   (`MQTT_BROKER_URL`, `MQTT_CLIENT_ID`, `MQTT_*_PATH`, `REDIS_URL`) are
-  validated at startup with file-existence checks for cert/key/CA paths.
-  Optional vars carry sensible defaults (`LOG_LEVEL`, `METRICS_PORT`,
+  validated at startup with file-existence checks for cert/key/CA paths and
+  protocol checks (only `mqtt://`/`mqtts://` and `redis://`/`rediss://` are
+  accepted). Optional vars carry sensible defaults (`LOG_LEVEL`, `METRICS_PORT`,
   `SHUTDOWN_TIMEOUT_MS`, MQTT keepalive/reconnect/connect timings, Redis
   queue keys + BLPOP timeout).
 - `ConfigError` aggregates all validation issues into a single error so
@@ -20,9 +21,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a time.
 - `redactUrl` + `sanitizedConfigForLog` — log helpers that omit the private
   key path and redact userinfo from URL fields.
-- `src/__tests__/config.test.ts` — 36 vitest cases covering happy paths,
-  missing-required, invalid URL/number/enum/boolean, file existence,
-  multi-issue reporting, redaction, and snapshot sanitization.
+- `src/__tests__/config.test.ts` — 47 vitest cases covering happy paths,
+  missing-required, invalid URL/number/enum/boolean, scheme validation,
+  file existence, multi-issue reporting, redaction, and snapshot
+  sanitization.
+- `src/state.ts` — singleton bridge state (`mqttConnected`,
+  `lastMessageReceivedAt`, `inflightOutbound`, `reconnectCount`) plus a
+  `resetState()` helper used by tests.
+- `src/redis.ts` — `RedisBridge` interface with `pushIncoming`,
+  `popOutgoing`, `quit`, `isReady`. Includes a parser that rejects malformed
+  outgoing envelopes before they reach the MQTT publish path. Phase 0.5
+  will flesh out retries and structured validation.
+- `src/mqtt.ts` — MQTT 5 client wrapper with mTLS, persistent session
+  (`clean: false`), keepalive/reconnect/connect timings from config, LWT on
+  `ospp/v1/server/status`, retained `online` status published on connect,
+  shared subscription on `$share/ospp-servers/ospp/v1/stations/+/to-server`,
+  outbound BLPOP loop that publishes envelopes from Redis with QoS 1, and a
+  `stop()` that unsubscribes, publishes a retained `offline` status, drains
+  the outbound loop, and ends the client gracefully.
+- `src/__tests__/mqtt.test.ts` — 25 vitest cases covering topic parsing,
+  client option construction, connect/subscribe/online-publish flow,
+  state transitions on connect/close/offline/reconnect, inbound envelope
+  shape and base64 round-trip, drop on unexpected topics, redis-push
+  failure resilience, outbound publish, malformed-envelope back-off, and
+  `stop()` semantics for both connected and never-connected paths.
 - `.env.example` — documented placeholder values for every variable.
 - `.prettierignore` — keeps `docs/`, `CHANGELOG.md`, and lockfile out of
   Prettier's scope.
@@ -31,12 +53,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `src/index.ts` now loads config first, exits non-zero with a structured
-  fatal log if validation fails, otherwise initializes the main logger from
-  `LOG_LEVEL` and logs the sanitized config snapshot.
+- `src/index.ts` wires up config → Redis bridge → MQTT bridge with explicit
+  shutdown handling: SIGTERM/SIGINT call `mqtt.stop()` then `redis.quit()`,
+  guarded by a `SHUTDOWN_TIMEOUT_MS` deadline that forces exit if cleanup
+  hangs; logs an explicit `INSECURE: TLS server cert validation disabled`
+  warning when `MQTT_REJECT_UNAUTHORIZED=false`.
 - `package.json` `build` script now uses `tsc -p tsconfig.build.json`.
 - `Dockerfile` builder stage copies both tsconfig files.
-- `README.md` env-var section replaced with full required/optional tables.
+- `README.md` env-var section replaced with full required/optional tables;
+  Status section now shows the Phase 0 progress matrix.
+
+### Dependencies
+
+- Added: `zod ^4.3.6` (config validation).
 
 ## [0.1.0] - 2026-04-28
 
