@@ -318,6 +318,25 @@ describe('buildClientOptions', () => {
     const opts = buildClientOptions(cfg);
     expect(opts.rejectUnauthorized).toBe(false);
   });
+
+  it('omits `servername` when MQTT_SERVERNAME is unset', () => {
+    const opts = buildClientOptions(validConfig);
+    expect('servername' in opts).toBe(false);
+  });
+
+  it('forwards MQTT_SERVERNAME as `servername` for SNI', () => {
+    const cfg = loadConfig({
+      MQTT_BROKER_URL: 'mqtts://emqx:8883',
+      MQTT_CLIENT_ID: 'csms-test-server-1',
+      MQTT_CERT_PATH: join(tmpDir, 'cert.pem'),
+      MQTT_KEY_PATH: join(tmpDir, 'key.pem'),
+      MQTT_CA_PATH: join(tmpDir, 'ca.pem'),
+      REDIS_URL: 'redis://redis.test:6379',
+      MQTT_SERVERNAME: 'mqtt-uat.onestoppay.ro',
+    });
+    const opts = buildClientOptions(cfg);
+    expect(opts.servername).toBe('mqtt-uat.onestoppay.ro');
+  });
 });
 
 // ── startMqttClient — connect / subscribe / status ──────────────────────────

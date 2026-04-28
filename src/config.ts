@@ -62,6 +62,14 @@ const envSchema = z.object({
   MQTT_CA_PATH: readableFile('MQTT_CA_PATH'),
   REDIS_URL: urlWithProtocol(['redis:', 'rediss:'], 'redis://host:6379'),
 
+  // Optional, no default. When set, passed to mqtt.js as `servername` so the
+  // TLS handshake sends this hostname in SNI. Useful when the connect URL host
+  // differs from the broker certificate's SAN — e.g. connecting to a Docker
+  // network alias (`emqx`) while the broker cert covers public hostnames
+  // (`mqtt-uat.onestoppay.ro`). When unset, mqtt.js defaults SNI to the URL
+  // host (current behavior).
+  MQTT_SERVERNAME: z.string().min(1, { message: 'must be a non-empty string' }).optional(),
+
   // Optional with defaults
   MQTT_REJECT_UNAUTHORIZED: booleanFromEnv.default(true),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
@@ -130,4 +138,5 @@ export const sanitizedConfigForLog = (
   mqttKeepalive: config.MQTT_KEEPALIVE,
   mqttReconnectPeriod: config.MQTT_RECONNECT_PERIOD,
   mqttConnectTimeout: config.MQTT_CONNECT_TIMEOUT,
+  ...(config.MQTT_SERVERNAME === undefined ? {} : { servername: config.MQTT_SERVERNAME }),
 });

@@ -207,6 +207,22 @@ describe('loadConfig — failure paths', () => {
   });
 });
 
+describe('loadConfig — MQTT_SERVERNAME', () => {
+  it('parses MQTT_SERVERNAME when set', () => {
+    const cfg = loadConfig({ ...validEnv, MQTT_SERVERNAME: 'mqtt-uat.onestoppay.ro' });
+    expect(cfg.MQTT_SERVERNAME).toBe('mqtt-uat.onestoppay.ro');
+  });
+
+  it('leaves MQTT_SERVERNAME undefined when unset', () => {
+    const cfg = loadConfig(validEnv);
+    expect(cfg.MQTT_SERVERNAME).toBeUndefined();
+  });
+
+  it('rejects empty MQTT_SERVERNAME', () => {
+    expect(() => loadConfig({ ...validEnv, MQTT_SERVERNAME: '' })).toThrow(/MQTT_SERVERNAME/);
+  });
+});
+
 describe('redactUrl', () => {
   it('redacts user:password from a URL', () => {
     expect(redactUrl('redis://user:secret@redis:6379/0')).toBe('redis://***@redis:6379/0');
@@ -249,5 +265,19 @@ describe('sanitizedConfigForLog', () => {
 
     expect(snapshot['certPath']).toBe(cfg.MQTT_CERT_PATH);
     expect(snapshot['caPath']).toBe(cfg.MQTT_CA_PATH);
+  });
+
+  it('includes servername when MQTT_SERVERNAME is set', () => {
+    const cfg = loadConfig({ ...validEnv, MQTT_SERVERNAME: 'mqtt-uat.onestoppay.ro' });
+    const snapshot = sanitizedConfigForLog(cfg);
+
+    expect(snapshot['servername']).toBe('mqtt-uat.onestoppay.ro');
+  });
+
+  it('omits servername when MQTT_SERVERNAME is unset', () => {
+    const cfg = loadConfig(validEnv);
+    const snapshot = sanitizedConfigForLog(cfg);
+
+    expect(Object.keys(snapshot)).not.toContain('servername');
   });
 });

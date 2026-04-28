@@ -83,6 +83,7 @@ for a copy-paste starting point.
 
 | Name                       | Default         | Description                                                                                                                                                           |
 | -------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MQTT_SERVERNAME`          | _unset_         | TLS SNI hostname override sent during the handshake. Set when the broker cert SAN doesn't include the connect hostname (e.g. connecting via an internal Docker alias `emqx` to a broker whose cert covers `*.onestoppay.ro`). When unset, mqtt.js sends the host portion of `MQTT_BROKER_URL`. |
 | `MQTT_REJECT_UNAUTHORIZED` | `true`          | Validate broker cert against `MQTT_CA_PATH`. **Do not set to `false` outside an ephemeral sandbox.** Accepted: `true`/`1`/`yes`, `false`/`0`/`no` (case-insensitive). |
 | `LOG_LEVEL`                | `info`          | Pino level: `trace` \| `debug` \| `info` \| `warn` \| `error` \| `fatal`.                                                                                             |
 | `METRICS_PORT`             | `9090`          | Prometheus exporter port (1–65535).                                                                                                                                   |
@@ -182,6 +183,27 @@ docker buildx imagetools inspect ghcr.io/ospp-org/csms-mqtt-bridge:0.1.0
 Run as you would the locally-built image — see the `docker run` example
 above and the [environment variables](#environment-variables) table for
 required configuration.
+
+### TLS SNI when connecting via an internal hostname
+
+When the bridge connects to the broker over an internal hostname that the
+broker certificate doesn't cover — typically a Docker network alias like
+`emqx` paired with a public-domain cert (`mqtt-uat.onestoppay.ro`) — the
+TLS handshake will fail certificate validation because mqtt.js defaults
+the SNI servername to the connect host.
+
+Set `MQTT_SERVERNAME` to the hostname covered by the cert SAN to override
+just the SNI servername without changing where the bridge connects:
+
+```bash
+MQTT_BROKER_URL=mqtts://emqx:8883
+MQTT_SERVERNAME=mqtt-uat.onestoppay.ro
+```
+
+The TCP/TLS connection still goes to `emqx:8883`, but the TLS ClientHello
+sends `mqtt-uat.onestoppay.ro` as the SNI hostname, which the broker uses
+to select the correct certificate and which the client uses to validate
+against the cert's SAN list.
 
 ## Repository layout
 

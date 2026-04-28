@@ -1,6 +1,6 @@
 {
   "name": "@ospp/csms-mqtt-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Node.js sidecar bridging EMQX MQTT (mTLS, shared subscription) and Redis queues for the CSMS server. Aligned with OSPP spec implementors-guide.md:48,626.",
   "type": "module",
   "private": true,

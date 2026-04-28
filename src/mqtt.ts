@@ -70,6 +70,10 @@ export const buildClientOptions = (config: Config): IClientOptions => ({
   key: readFileSync(config.MQTT_KEY_PATH),
   ca: readFileSync(config.MQTT_CA_PATH),
   rejectUnauthorized: config.MQTT_REJECT_UNAUTHORIZED,
+  // Override the SNI hostname sent in the TLS handshake. mqtt.js forwards
+  // `servername` to the underlying tls.connect; when omitted, tls.connect
+  // defaults to the URL host.
+  ...(config.MQTT_SERVERNAME === undefined ? {} : { servername: config.MQTT_SERVERNAME }),
   resubscribe: false,
   will: {
     topic: serverStatusTopicFor(config.MQTT_CLIENT_ID),

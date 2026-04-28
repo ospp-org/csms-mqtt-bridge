@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+## [0.1.1] - 2026-04-28
+
+### Added
+
+- `MQTT_SERVERNAME` optional env var for TLS SNI hostname override. Useful
+  when connecting via an internal hostname (e.g. Docker network alias
+  `emqx`) to a broker whose certificate SAN covers public hostnames
+  (e.g. `mqtt-uat.onestoppay.ro`). When set, the value is forwarded to
+  mqtt.js as `servername` and used as the SNI hostname in the TLS
+  ClientHello; the TCP/TLS connection target itself is unchanged. When
+  unset, behavior is identical to 0.1.0 (mqtt.js defaults SNI to the URL
+  host).
+
 ## [0.1.0] - 2026-04-28
 
 Initial OSPP MQTT bridge release. Covers AUDIT v2 phases 0.1 through 0.7a —
@@ -182,5 +195,6 @@ that produces this image.
   `csms-uat-server-1`) — provisioning happens out-of-band via the
   `ospp:generate-server-cert` artisan command in csms-server (Phase 0.6).
 
-[Unreleased]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ospp-org/csms-mqtt-bridge/releases/tag/v0.1.0
