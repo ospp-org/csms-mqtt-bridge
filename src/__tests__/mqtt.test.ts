@@ -165,9 +165,17 @@ afterEach(async () => {
 
 describe('parseStationFromTopic', () => {
   it.each([
+    // 8-char numeric (all 0-9, valid hex)
     ['ospp/v1/stations/stn_00000001/to-server', 'stn_00000001'],
-    ['ospp/v1/stations/stn_abc/to-server', 'stn_abc'],
+    // 8-char mixed hex
+    ['ospp/v1/stations/stn_a1b2c3d4/to-server', 'stn_a1b2c3d4'],
+    // 12-char hex
     ['ospp/v1/stations/stn_a1b2c3d4e5f6/to-server', 'stn_a1b2c3d4e5f6'],
+    // 60-char hex (upper bound)
+    [
+      'ospp/v1/stations/stn_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6/to-server',
+      'stn_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6',
+    ],
   ])('extracts stationId from %s', (topic, expected) => {
     expect(parseStationFromTopic(topic)).toBe(expected);
   });
@@ -181,6 +189,16 @@ describe('parseStationFromTopic', () => {
     'ospp/v1/stations/stn_00000001/to-server/extra', // trailing segment
     'random/topic',
     '',
+    // Spec compliance — added when regex tightened to ^stn_[a-f0-9]{8,60}$:
+    'ospp/v1/stations/stn_invalidchars/to-server', // non-hex chars (i, n, v, l, h, r, s)
+    'ospp/v1/stations/stn_short/to-server', // under 8 chars
+    'ospp/v1/stations/stn_abc/to-server', // 3 chars — formerly accepted, now under-min
+    'ospp/v1/stations/stn_ABC12345/to-server', // uppercase hex (regex is lowercase only)
+    'ospp/v1/stations/stn_a1b2c3d/to-server', // exactly 7 chars — under-min by 1
+    // 61 hex chars — over upper bound by 1
+    'ospp/v1/stations/stn_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a/to-server',
+    // Original prompt's over-60 case (66 hex chars)
+    'ospp/v1/stations/stn_a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890/to-server',
   ])('rejects topic: %s', (topic) => {
     expect(parseStationFromTopic(topic)).toBeNull();
   });

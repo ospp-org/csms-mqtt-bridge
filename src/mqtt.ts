@@ -18,7 +18,11 @@ import { state } from './state.js';
 
 export const SHARED_SUB_TOPIC = '$share/ospp-servers/ospp/v1/stations/+/to-server';
 export const SERVER_STATUS_TOPIC = 'ospp/v1/server/status';
-const STATION_TOPIC_RE = /^ospp\/v1\/stations\/(stn_[a-z0-9]{3,32})\/to-server$/;
+
+// Station ID format per spec/spec/01-architecture.md:127 + glossary.md:331-332:
+// `stn_` prefix + 8 or more lowercase hex chars. Upper bound 60 = csms-server's
+// 64-char StationId max minus the 4-char prefix.
+const STATION_TOPIC_RE = /^ospp\/v1\/stations\/(stn_[a-f0-9]{8,60})\/to-server$/;
 
 export type MqttConnector = (url: string, opts: IClientOptions) => MqttClient;
 
