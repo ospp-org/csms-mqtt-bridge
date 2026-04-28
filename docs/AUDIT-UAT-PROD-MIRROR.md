@@ -85,6 +85,7 @@ The following are settled. Implementer (Claude CLI) may flag if any decision app
 | 15 | Existing 30 stations seeded with `ecdsa_public_key = NULL` and no certs | MEDIUM (data, not config) | E | seeded data |
 | 16 | No admin endpoint for provisioning-tokens issuance | HIGH | E | new endpoint required |
 | 17 | docker-compose.prod.yml lacks observability stack | HIGH | F | investigate |
+| 18 | csms-server stationId validation too loose: `RegisterStationRequest` only enforces `string\|max:64`, `StationId` value object only checks `str_starts_with('stn_')`. Spec demands `^stn_[a-f0-9]{8,}$` (per spec/spec/01-architecture.md:127, glossary.md:331-332). csms-server accepts non-spec-compliant ids (e.g. `stn_xyz`). Discovered during csms-mqtt-bridge Phase 0.4 review when bridge regex was tightened. | HIGH | E | csms-server `app/Http/Requests/Admin/RegisterStationRequest.php` + `app/Shared/ValueObjects/StationId.php` |
 
 ### 1.3 Architectural decision: pure mTLS, sidecar MQTT subscriber
 
