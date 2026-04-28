@@ -17,7 +17,20 @@ import type { IncomingEnvelope, OutgoingEnvelope, RedisBridge } from './redis.js
 import { state } from './state.js';
 
 export const SHARED_SUB_TOPIC = '$share/ospp-servers/ospp/v1/stations/+/to-server';
-export const SERVER_STATUS_TOPIC = 'ospp/v1/server/status';
+
+/**
+ * Per-instance retained status topic. Singleton `ospp/v1/server/status` would
+ * cause last-write-wins conflicts in multi-instance deployments — when a
+ * second bridge instance connects, its retained "online" overwrites the first
+ * instance's, even if the first is still up. Per-instance topic gives each
+ * clientId its own retained status; LWT cleans it up gracefully on disconnect.
+ *
+ * The OSPP spec only defines `ospp/v1/stations/*` topics
+ * (spec/spec/02-transport.md:112-115); server-level status is bridge-internal
+ * convention.
+ */
+export const serverStatusTopicFor = (clientId: string): string =>
+  `ospp/v1/servers/${clientId}/status`;
 
 // Station ID format per spec/spec/01-architecture.md:127 + glossary.md:331-332:
 // `stn_` prefix + 8 or more lowercase hex chars. Upper bound 60 = csms-server's
@@ -57,7 +70,7 @@ export const buildClientOptions = (config: Config): IClientOptions => ({
   rejectUnauthorized: config.MQTT_REJECT_UNAUTHORIZED,
   resubscribe: false,
   will: {
-    topic: SERVER_STATUS_TOPIC,
+    topic: serverStatusTopicFor(config.MQTT_CLIENT_ID),
     payload: Buffer.from(buildStatusPayload(config.MQTT_CLIENT_ID, 'offline')),
     qos: 1,
     retain: true,
@@ -175,15 +188,21 @@ const startOutboundLoop = (
 };
 
 const registerLifecycleListeners = (client: MqttClient, config: Config, logger: Logger): void => {
+  const statusTopic = serverStatusTopicFor(config.MQTT_CLIENT_ID);
+
   client.on('connect', (packet: IConnackPacket) => {
     state.mqttConnected = true;
     logger.info(
-      { reasonCode: packet.reasonCode ?? 0, sessionPresent: packet.sessionPresent },
+      {
+        reasonCode: packet.reasonCode ?? 0,
+        sessionPresent: packet.sessionPresent,
+        statusTopic,
+      },
       'mqtt connected',
     );
 
     client.publish(
-      SERVER_STATUS_TOPIC,
+      statusTopic,
       Buffer.from(buildStatusPayload(config.MQTT_CLIENT_ID, 'online')),
       { qos: 1, retain: true, properties: { contentType: 'application/json' } },
       (err) => {
@@ -256,7 +275,7 @@ export const startMqttClient = (
 
       await new Promise<void>((resolve) => {
         client.publish(
-          SERVER_STATUS_TOPIC,
+          serverStatusTopicFor(config.MQTT_CLIENT_ID),
           Buffer.from(buildStatusPayload(config.MQTT_CLIENT_ID, 'offline')),
           { qos: 1, retain: true, properties: { contentType: 'application/json' } },
           () => {

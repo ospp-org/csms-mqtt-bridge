@@ -21,7 +21,7 @@ import type { MqttBridge, MqttConnector } from '../mqtt.js';
 import {
   buildClientOptions,
   parseStationFromTopic,
-  SERVER_STATUS_TOPIC,
+  serverStatusTopicFor,
   SHARED_SUB_TOPIC,
   startMqttClient,
 } from '../mqtt.js';
@@ -226,7 +226,8 @@ describe('buildClientOptions', () => {
     expect((opts.key as Buffer).toString()).toBe('fake-key');
     expect((opts.ca as Buffer).toString()).toBe('fake-ca');
 
-    expect(opts.will?.topic).toBe(SERVER_STATUS_TOPIC);
+    expect(opts.will?.topic).toBe('ospp/v1/servers/csms-test-server-1/status');
+    expect(opts.will?.topic).toBe(serverStatusTopicFor('csms-test-server-1'));
     expect(opts.will?.qos).toBe(1);
     expect(opts.will?.retain).toBe(true);
     expect(opts.will?.payload).toBeDefined();
@@ -303,8 +304,9 @@ describe('startMqttClient', () => {
     start(validConfig, makeFakeRedis(), connector);
     fireConnect(fakeClient);
 
+    const expectedStatusTopic = serverStatusTopicFor('csms-test-server-1');
     const publishCalls = fakeClient.publish.mock.calls;
-    const statusCall = publishCalls.find((c) => c[0] === SERVER_STATUS_TOPIC);
+    const statusCall = publishCalls.find((c) => c[0] === expectedStatusTopic);
     expect(statusCall).toBeDefined();
     const payload = statusCall?.[1] as Buffer;
     const opts = statusCall?.[2] as IClientPublishOptions;
@@ -490,8 +492,9 @@ describe('startMqttClient — stop()', () => {
 
     expect(fakeClient.unsubscribe).toHaveBeenCalledWith(SHARED_SUB_TOPIC, expect.any(Function));
 
+    const expectedStatusTopic = serverStatusTopicFor('csms-test-server-1');
     const offlineCall = fakeClient.publish.mock.calls.find((c) => {
-      if (c[0] !== SERVER_STATUS_TOPIC) return false;
+      if (c[0] !== expectedStatusTopic) return false;
       const payload = c[1] as Buffer;
       return payload.toString().includes('"status":"offline"');
     });
@@ -511,8 +514,9 @@ describe('startMqttClient — stop()', () => {
 
     expect(fakeClient.unsubscribe).not.toHaveBeenCalled();
     // No status publish either (no connection → can't publish).
+    const expectedStatusTopic = serverStatusTopicFor('csms-test-server-1');
     const statusPublishes = fakeClient.publish.mock.calls.filter(
-      (c) => c[0] === SERVER_STATUS_TOPIC,
+      (c) => c[0] === expectedStatusTopic,
     );
     expect(statusPublishes).toHaveLength(0);
     expect(fakeClient.end).toHaveBeenCalledTimes(1);
