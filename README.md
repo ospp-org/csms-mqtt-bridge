@@ -95,6 +95,17 @@ for a copy-paste starting point.
 
 ## Build & run
 
+Local development should use **Node 22 LTS** to match CI and the production
+container. The repo ships a `.nvmrc` file so:
+
+```bash
+nvm use   # picks up .nvmrc → Node 22
+```
+
+Mixing Node 24 locally and Node 22 in CI is supported (current code is
+forward-compatible) but small drift bugs can sneak in — keep the dev
+environment aligned.
+
 ### Local development
 
 ```bash
