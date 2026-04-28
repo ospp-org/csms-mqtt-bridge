@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Documentation
+
+- README: removed broken placeholder link to upstream `mqtt.js` issue
+  (decision: not filing upstream — the Docker network alias workaround
+  is the permanent solution). The surrounding caveat already cites the
+  upstream bug location (`connect/tls.js:28`) and explains the limitation.
 
 ## [0.1.3] - 2026-04-28
 

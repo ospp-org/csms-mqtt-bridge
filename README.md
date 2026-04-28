@@ -191,8 +191,7 @@ required configuration.
 > (`opts.servername = opts.host` runs unconditionally for hostname targets,
 > overwriting the user-provided `servername`). The variable is plumbed
 > through correctly by this bridge — it will start working the day the
-> upstream fix lands, with no code change required here. Tracked at
-> [mqttjs/MQTT.js issue #N](https://github.com/mqttjs/MQTT.js/issues/N).
+> upstream fix lands, with no code change required here.
 >
 > **Workaround until upstream is fixed**: use a Docker network alias so the
 > connect URL host already matches the broker certificate SAN. Then SNI =
