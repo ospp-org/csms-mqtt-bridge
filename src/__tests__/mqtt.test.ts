@@ -324,6 +324,24 @@ describe('buildClientOptions', () => {
     expect('servername' in opts).toBe(false);
   });
 
+  it('omits `ca` when MQTT_CA_PATH is unset (Node default trust)', () => {
+    const cfg = loadConfig({
+      MQTT_BROKER_URL: 'mqtts://broker.test:8884',
+      MQTT_CLIENT_ID: 'csms-test-server-1',
+      MQTT_CERT_PATH: join(tmpDir, 'cert.pem'),
+      MQTT_KEY_PATH: join(tmpDir, 'key.pem'),
+      REDIS_URL: 'redis://redis.test:6379',
+    });
+    const opts = buildClientOptions(cfg);
+    expect('ca' in opts).toBe(false);
+  });
+
+  it('reads CA bundle into `ca` buffer when MQTT_CA_PATH is set', () => {
+    const opts = buildClientOptions(validConfig);
+    expect(Buffer.isBuffer(opts.ca)).toBe(true);
+    expect((opts.ca as Buffer).toString()).toBe('fake-ca');
+  });
+
   it('forwards MQTT_SERVERNAME as `servername` for SNI', () => {
     const cfg = loadConfig({
       MQTT_BROKER_URL: 'mqtts://emqx:8883',

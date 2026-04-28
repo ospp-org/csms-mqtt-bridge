@@ -68,7 +68,10 @@ export const buildClientOptions = (config: Config): IClientOptions => ({
   connectTimeout: config.MQTT_CONNECT_TIMEOUT,
   cert: readFileSync(config.MQTT_CERT_PATH),
   key: readFileSync(config.MQTT_KEY_PATH),
-  ca: readFileSync(config.MQTT_CA_PATH),
+  // When MQTT_CA_PATH is unset, mqtt.js / tls.connect fall back to Node's
+  // default trust (system CA bundle). Useful when the broker presents a
+  // certificate signed by a publicly-trusted CA (e.g. Let's Encrypt).
+  ...(config.MQTT_CA_PATH === undefined ? {} : { ca: readFileSync(config.MQTT_CA_PATH) }),
   rejectUnauthorized: config.MQTT_REJECT_UNAUTHORIZED,
   // Override the SNI hostname sent in the TLS handshake. mqtt.js forwards
   // `servername` to the underlying tls.connect; when omitted, tls.connect

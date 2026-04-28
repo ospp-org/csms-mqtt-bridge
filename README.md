@@ -76,15 +76,15 @@ for a copy-paste starting point.
 | `MQTT_CLIENT_ID`  | Sidecar clientid; must match CN of the server certificate.               | `csms-uat-server-1`                   |
 | `MQTT_CERT_PATH`  | PEM path to the server certificate (signed by Station CA).               | `/run/secrets/server-cert.pem`        |
 | `MQTT_KEY_PATH`   | PEM path to the server private key (mode 0600). Never logged.            | `/run/secrets/server-key.pem`         |
-| `MQTT_CA_PATH`    | PEM path to the chain validating the broker cert (Station CA + Root CA). | `/run/secrets/server-chain.pem`       |
 | `REDIS_URL`       | Redis URL incl. protocol; credentials in the URL are redacted from logs. | `redis://csms-redis:6379/0`           |
 
 ### Optional (defaults shown)
 
 | Name                       | Default         | Description                                                                                                                                                           |
 | -------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MQTT_CA_PATH`             | _unset_         | PEM path to the CA bundle for verifying the broker certificate. When unset, mqtt.js / `tls.connect` fall back to Node's default trust (system CA bundle, includes Let's Encrypt and other public roots) — the right choice when the broker presents a publicly-trusted cert. Required only for non-public CAs (self-signed, internal Station CA). |
 | `MQTT_SERVERNAME`          | _unset_         | TLS SNI hostname override sent during the handshake. Set when the broker cert SAN doesn't include the connect hostname (e.g. connecting via an internal Docker alias `emqx` to a broker whose cert covers `*.onestoppay.ro`). When unset, mqtt.js sends the host portion of `MQTT_BROKER_URL`. |
-| `MQTT_REJECT_UNAUTHORIZED` | `true`          | Validate broker cert against `MQTT_CA_PATH`. **Do not set to `false` outside an ephemeral sandbox.** Accepted: `true`/`1`/`yes`, `false`/`0`/`no` (case-insensitive). |
+| `MQTT_REJECT_UNAUTHORIZED` | `true`          | Validate the broker certificate. When `MQTT_CA_PATH` is set, validation runs against that bundle; otherwise against Node's system CA trust. **Do not set to `false` outside an ephemeral sandbox.** Accepted: `true`/`1`/`yes`, `false`/`0`/`no` (case-insensitive). |
 | `LOG_LEVEL`                | `info`          | Pino level: `trace` \| `debug` \| `info` \| `warn` \| `error` \| `fatal`.                                                                                             |
 | `METRICS_PORT`             | `9090`          | Prometheus exporter port (1–65535).                                                                                                                                   |
 | `SHUTDOWN_TIMEOUT_MS`      | `10000`         | Graceful shutdown deadline in ms.                                                                                                                                     |
@@ -198,12 +198,18 @@ just the SNI servername without changing where the bridge connects:
 ```bash
 MQTT_BROKER_URL=mqtts://emqx:8883
 MQTT_SERVERNAME=mqtt-uat.onestoppay.ro
+# MQTT_CA_PATH unset — system trust is used (Let's Encrypt, etc.)
 ```
 
 The TCP/TLS connection still goes to `emqx:8883`, but the TLS ClientHello
 sends `mqtt-uat.onestoppay.ro` as the SNI hostname, which the broker uses
 to select the correct certificate and which the client uses to validate
 against the cert's SAN list.
+
+When the broker presents a publicly-trusted certificate (Let's Encrypt,
+DigiCert, etc.), `MQTT_CA_PATH` can be omitted entirely — Node's default
+trust store includes the major public roots. Set `MQTT_CA_PATH` only when
+the broker uses a non-public CA (self-signed, internal Station CA).
 
 ## Repository layout
 

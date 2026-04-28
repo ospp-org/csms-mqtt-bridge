@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes yet._
 
+## [0.1.2] - 2026-04-28
+
+### Changed
+
+- `MQTT_CA_PATH` is now optional. When unset, mqtt.js falls back to Node's
+  default TLS trust (system CA bundle), which is sufficient for brokers
+  using publicly-trusted certificates (Let's Encrypt etc.). When set,
+  behavior unchanged from 0.1.1 — the file is read and used as the CA
+  trust anchor.
+- `sanitizedConfigForLog` now omits `caPath` when `MQTT_CA_PATH` is unset
+  (consistent with the `servername` handling introduced in 0.1.1).
+
 ## [0.1.1] - 2026-04-28
 
 ### Added
@@ -195,6 +207,7 @@ that produces this image.
   `csms-uat-server-1`) — provisioning happens out-of-band via the
   `ospp:generate-server-cert` artisan command in csms-server (Phase 0.6).
 
-[Unreleased]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ospp-org/csms-mqtt-bridge/releases/tag/v0.1.0

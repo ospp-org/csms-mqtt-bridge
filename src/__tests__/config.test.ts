@@ -115,8 +115,9 @@ describe('loadConfig — failure paths', () => {
     expect(paths).toContain('MQTT_CLIENT_ID');
     expect(paths).toContain('MQTT_CERT_PATH');
     expect(paths).toContain('MQTT_KEY_PATH');
-    expect(paths).toContain('MQTT_CA_PATH');
     expect(paths).toContain('REDIS_URL');
+    // MQTT_CA_PATH is optional (system trust fallback) — must NOT appear.
+    expect(paths).not.toContain('MQTT_CA_PATH');
   });
 
   it('throws on invalid MQTT_BROKER_URL', () => {
@@ -188,12 +189,6 @@ describe('loadConfig — failure paths', () => {
     );
   });
 
-  it('throws when MQTT_CA_PATH does not exist', () => {
-    expect(() => loadConfig({ ...validEnv, MQTT_CA_PATH: '/does/not/exist/ca.pem' })).toThrow(
-      /MQTT_CA_PATH.*not found or not readable/,
-    );
-  });
-
   it('exposes structured issues on ConfigError', () => {
     let err: ConfigError | undefined;
     try {
@@ -202,8 +197,31 @@ describe('loadConfig — failure paths', () => {
       if (e instanceof ConfigError) err = e;
     }
     expect(err).toBeDefined();
-    expect(err?.issues.length).toBeGreaterThanOrEqual(6);
+    expect(err?.issues.length).toBeGreaterThanOrEqual(5);
     expect(err?.name).toBe('ConfigError');
+  });
+});
+
+describe('loadConfig — MQTT_CA_PATH (optional)', () => {
+  it('parses MQTT_CA_PATH when set to a readable file', () => {
+    const cfg = loadConfig(validEnv);
+    expect(cfg.MQTT_CA_PATH).toBe(join(tmpDir, 'ca.pem'));
+  });
+
+  it('leaves MQTT_CA_PATH undefined when unset (system trust fallback)', () => {
+    const { MQTT_CA_PATH: _omit, ...minimal } = validEnv;
+    const cfg = loadConfig(minimal);
+    expect(cfg.MQTT_CA_PATH).toBeUndefined();
+  });
+
+  it('still validates file readability when MQTT_CA_PATH is set', () => {
+    expect(() => loadConfig({ ...validEnv, MQTT_CA_PATH: '/does/not/exist/ca.pem' })).toThrow(
+      /MQTT_CA_PATH.*not found or not readable/,
+    );
+  });
+
+  it('rejects empty MQTT_CA_PATH', () => {
+    expect(() => loadConfig({ ...validEnv, MQTT_CA_PATH: '' })).toThrow(/MQTT_CA_PATH/);
   });
 });
 
@@ -265,6 +283,14 @@ describe('sanitizedConfigForLog', () => {
 
     expect(snapshot['certPath']).toBe(cfg.MQTT_CERT_PATH);
     expect(snapshot['caPath']).toBe(cfg.MQTT_CA_PATH);
+  });
+
+  it('omits caPath when MQTT_CA_PATH is unset', () => {
+    const { MQTT_CA_PATH: _omit, ...minimal } = validEnv;
+    const cfg = loadConfig(minimal);
+    const snapshot = sanitizedConfigForLog(cfg);
+
+    expect(Object.keys(snapshot)).not.toContain('caPath');
   });
 
   it('includes servername when MQTT_SERVERNAME is set', () => {

@@ -59,8 +59,14 @@ const envSchema = z.object({
   MQTT_CLIENT_ID: z.string().min(1, { message: 'must be a non-empty string' }),
   MQTT_CERT_PATH: readableFile('MQTT_CERT_PATH'),
   MQTT_KEY_PATH: readableFile('MQTT_KEY_PATH'),
-  MQTT_CA_PATH: readableFile('MQTT_CA_PATH'),
   REDIS_URL: urlWithProtocol(['redis:', 'rediss:'], 'redis://host:6379'),
+
+  // Optional. When set, the file is read and used as the TLS trust anchor.
+  // When unset, mqtt.js / tls.connect fall back to Node's default trust
+  // (system CA bundle, includes Let's Encrypt and other public roots) — the
+  // right choice when the broker presents a publicly-trusted certificate.
+  // Required only for non-public CAs (self-signed, internal Station CA).
+  MQTT_CA_PATH: readableFile('MQTT_CA_PATH').optional(),
 
   // Optional, no default. When set, passed to mqtt.js as `servername` so the
   // TLS handshake sends this hostname in SNI. Useful when the connect URL host
@@ -126,7 +132,6 @@ export const sanitizedConfigForLog = (
   brokerUrl: redactUrl(config.MQTT_BROKER_URL),
   clientId: config.MQTT_CLIENT_ID,
   certPath: config.MQTT_CERT_PATH,
-  caPath: config.MQTT_CA_PATH,
   rejectUnauthorized: config.MQTT_REJECT_UNAUTHORIZED,
   redisUrl: redactUrl(config.REDIS_URL),
   redisQueueIncoming: config.REDIS_QUEUE_INCOMING,
@@ -138,5 +143,6 @@ export const sanitizedConfigForLog = (
   mqttKeepalive: config.MQTT_KEEPALIVE,
   mqttReconnectPeriod: config.MQTT_RECONNECT_PERIOD,
   mqttConnectTimeout: config.MQTT_CONNECT_TIMEOUT,
+  ...(config.MQTT_CA_PATH === undefined ? {} : { caPath: config.MQTT_CA_PATH }),
   ...(config.MQTT_SERVERNAME === undefined ? {} : { servername: config.MQTT_SERVERNAME }),
 });
