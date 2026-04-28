@@ -54,6 +54,7 @@ describe('loadConfig — happy paths', () => {
     expect(cfg.MQTT_REJECT_UNAUTHORIZED).toBe(true);
     expect(cfg.REDIS_QUEUE_INCOMING).toBe('mqtt:incoming');
     expect(cfg.REDIS_QUEUE_OUTGOING).toBe('mqtt:outgoing');
+    expect(cfg.REDIS_QUEUE_PROCESSING).toBe('mqtt:processing');
     expect(cfg.REDIS_BLPOP_TIMEOUT_SEC).toBe(5);
   });
 

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 
 import mqtt from 'mqtt';
 import type {
+  DoneCallback,
   IClientOptions,
   IClientPublishOptions,
   IConnackPacket,
@@ -13,7 +14,7 @@ import type {
 import type { Logger } from 'pino';
 
 import type { Config } from './config.js';
-import type { IncomingEnvelope, OutgoingEnvelope, RedisBridge } from './redis.js';
+import type { IncomingEnvelope, OutgoingEnvelope, RedisBridge, ReliableOutgoing } from './redis.js';
 import { ENVELOPE_VERSION } from './redis.js';
 import { state } from './state.js';
 
@@ -79,16 +80,25 @@ export const buildClientOptions = (config: Config): IClientOptions => ({
   },
 });
 
-const handleInbound = async (
-  topic: string,
-  payload: Buffer,
+/**
+ * Push the inbound message to Redis. Returns normally on success or on a
+ * deliberate drop (unknown topic — drop the message and ack to broker).
+ * Throws if the Redis push fails — caller MUST translate that into a no-ack
+ * so the broker re-delivers on reconnect / share-group rebalance.
+ */
+export const handleInbound = async (
   packet: IPublishPacket,
   redis: RedisBridge,
   logger: Logger,
 ): Promise<void> => {
+  const topic = packet.topic;
+  const payload = Buffer.isBuffer(packet.payload) ? packet.payload : Buffer.from(packet.payload);
+
   const stationId = parseStationFromTopic(topic);
   if (stationId === null) {
-    logger.warn({ topic }, 'received message on unexpected topic, dropping');
+    // Acking on drop is intentional — a "garbage" topic should not be redelivered
+    // on every reconnect. Log warn so it's still visible.
+    logger.warn({ topic }, 'received message on unexpected topic, dropping (will ack)');
     return;
   }
 
@@ -106,18 +116,13 @@ const handleInbound = async (
     properties: packet.properties ?? null,
   };
 
-  try {
-    await redis.pushIncoming(envelope);
-    logger.debug(
-      { stationId, qos: envelope.qos, bytes: payload.length, messageId: envelope.messageId },
-      'inbound pushed to redis',
-    );
-  } catch (err) {
-    logger.error(
-      { err, stationId, topic, messageId: envelope.messageId },
-      'failed to push inbound to redis',
-    );
-  }
+  // Re-throw on push failure: handleMessage's caller will translate into a
+  // missing PUBACK so the broker keeps the message and re-delivers later.
+  await redis.pushIncoming(envelope);
+  logger.debug(
+    { stationId, qos: envelope.qos, bytes: payload.length, messageId: envelope.messageId },
+    'inbound pushed to redis (will ack)',
+  );
 };
 
 const publishEnvelope = (
@@ -165,14 +170,29 @@ const startOutboundLoop = (
   const loop = async (): Promise<void> => {
     logger.debug('outbound loop started');
     while (!ctl.stopRequested) {
+      let item: ReliableOutgoing | null = null;
       try {
-        const envelope = await redis.popOutgoing();
-        if (envelope === null) continue;
-        await publishEnvelope(envelope, client, logger);
-      } catch (err) {
+        item = await redis.popOutgoingReliable();
+      } catch (popErr) {
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ctl.stopRequested may flip during the await above; the condition is required.
         if (ctl.stopRequested) return;
-        logger.warn({ err }, 'outbound iteration failed; backing off 1s');
+        logger.warn({ err: popErr }, 'outbound pop/parse failed; backing off 1s');
+        await sleep(1_000);
+        continue;
+      }
+
+      if (item === null) continue;
+
+      try {
+        await publishEnvelope(item.envelope, client, logger);
+        await item.ack();
+      } catch (publishErr) {
+        // Do NOT ack — envelope stays in PROCESSING, replayed on next startup
+        // (or by mqtt.js's internal store on reconnect, since clean=false).
+        logger.warn(
+          { err: publishErr, topic: item.envelope.topic },
+          'publish failed; envelope stays in processing for retry',
+        );
         await sleep(1_000);
       }
     }
@@ -189,8 +209,51 @@ const startOutboundLoop = (
   };
 };
 
-const registerLifecycleListeners = (client: MqttClient, config: Config, logger: Logger): void => {
+const replayProcessingOnce = async (
+  redis: RedisBridge,
+  client: MqttClient,
+  logger: Logger,
+): Promise<void> => {
+  let items: ReliableOutgoing[];
+  try {
+    items = await redis.replayProcessing();
+  } catch (err) {
+    logger.error({ err }, 'replayProcessing failed at startup');
+    return;
+  }
+
+  if (items.length === 0) {
+    logger.debug('processing queue empty at startup, no replay needed');
+    return;
+  }
+
+  logger.warn({ count: items.length }, 'replaying envelopes from processing queue');
+  let replayed = 0;
+  let stuck = 0;
+  for (const item of items) {
+    try {
+      await publishEnvelope(item.envelope, client, logger);
+      await item.ack();
+      replayed += 1;
+    } catch (err) {
+      logger.error(
+        { err, topic: item.envelope.topic },
+        'replay publish failed; envelope remains in processing',
+      );
+      stuck += 1;
+    }
+  }
+  logger.info({ replayed, stuck }, 'startup replay complete');
+};
+
+const registerLifecycleListeners = (
+  client: MqttClient,
+  config: Config,
+  redis: RedisBridge,
+  logger: Logger,
+): void => {
   const statusTopic = serverStatusTopicFor(config.MQTT_CLIENT_ID);
+  let hasReplayedOnStartup = false;
 
   client.on('connect', (packet: IConnackPacket) => {
     state.mqttConnected = true;
@@ -219,6 +282,11 @@ const registerLifecycleListeners = (client: MqttClient, config: Config, logger: 
       }
       logger.info({ granted }, 'subscribed to shared topic');
     });
+
+    if (!hasReplayedOnStartup) {
+      hasReplayedOnStartup = true;
+      void replayProcessingOnce(redis, client, logger);
+    }
   });
 
   client.on('reconnect', () => {
@@ -245,6 +313,38 @@ const registerLifecycleListeners = (client: MqttClient, config: Config, logger: 
   });
 };
 
+/**
+ * Override `client.handleMessage` so PUBACK to the broker fires only after
+ * the inbound envelope has been pushed to Redis. On Redis failure we call
+ * the done callback with an error, which causes mqtt.js to skip PUBACK —
+ * the broker holds the message and re-delivers on reconnect.
+ *
+ * This is the at-least-once delivery anchor for the inbound path. Replaces
+ * the previous `client.on('message', ...)` listener, which had no way to
+ * gate the ack.
+ */
+const installManualAck = (client: MqttClient, redis: RedisBridge, logger: Logger): void => {
+  const wrapped = (packet: IPublishPacket, callback: DoneCallback): void => {
+    handleInbound(packet, redis, logger).then(
+      () => {
+        callback();
+      },
+      (err: unknown) => {
+        const error = err instanceof Error ? err : new Error(String(err));
+        logger.error(
+          { err: error, topic: packet.topic },
+          'inbound push failed; NOT acking — broker will redeliver',
+        );
+        callback(error);
+      },
+    );
+  };
+  // mqtt.js declares handleMessage as a method on MqttClient; assigning a
+  // replacement is supported at runtime (see mqtt/lib/handlers/publish.js)
+  // but TS sees it as an instance method — cast through unknown.
+  (client as unknown as { handleMessage: typeof wrapped }).handleMessage = wrapped;
+};
+
 export const startMqttClient = (
   config: Config,
   redis: RedisBridge,
@@ -254,13 +354,8 @@ export const startMqttClient = (
   const opts = buildClientOptions(config);
   const client = connect(config.MQTT_BROKER_URL, opts);
 
-  registerLifecycleListeners(client, config, logger);
-
-  client.on('message', (topic, payload, packet) => {
-    handleInbound(topic, payload, packet, redis, logger).catch((err: unknown) => {
-      logger.error({ err, topic }, 'inbound handler crashed');
-    });
-  });
+  registerLifecycleListeners(client, config, redis, logger);
+  installManualAck(client, redis, logger);
 
   const outbound = startOutboundLoop(redis, client, logger);
 

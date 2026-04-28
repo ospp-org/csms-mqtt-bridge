@@ -72,6 +72,11 @@ const envSchema = z.object({
   MQTT_CONNECT_TIMEOUT: positiveInt.default(30000),
   REDIS_QUEUE_INCOMING: z.string().min(1).default('mqtt:incoming'),
   REDIS_QUEUE_OUTGOING: z.string().min(1).default('mqtt:outgoing'),
+  // Bridge-internal queue holding messages BLMOVE'd out of OUTGOING and not yet
+  // acked (PUBACK from broker). On startup the bridge replays anything stuck
+  // here from a previous crash. Single-instance scope; multi-instance HA
+  // (Phase F.7) will need a per-clientId suffix to avoid cross-instance theft.
+  REDIS_QUEUE_PROCESSING: z.string().min(1).default('mqtt:processing'),
   REDIS_BLPOP_TIMEOUT_SEC: positiveInt.default(5),
 });
 
@@ -118,6 +123,7 @@ export const sanitizedConfigForLog = (
   redisUrl: redactUrl(config.REDIS_URL),
   redisQueueIncoming: config.REDIS_QUEUE_INCOMING,
   redisQueueOutgoing: config.REDIS_QUEUE_OUTGOING,
+  redisQueueProcessing: config.REDIS_QUEUE_PROCESSING,
   metricsPort: config.METRICS_PORT,
   logLevel: config.LOG_LEVEL,
   shutdownTimeoutMs: config.SHUTDOWN_TIMEOUT_MS,

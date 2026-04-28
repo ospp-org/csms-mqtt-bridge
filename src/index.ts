@@ -35,11 +35,31 @@ if (!config.MQTT_REJECT_UNAUTHORIZED) {
   );
 }
 
-logger.info({ phase: '0.4', config: sanitizedConfigForLog(config) }, 'csms-mqtt-bridge starting');
+logger.info({ phase: '0.5', config: sanitizedConfigForLog(config) }, 'csms-mqtt-bridge starting');
 
-const redis: RedisBridge = createRedisBridge(config);
+// Ordered startup:
+//  1. Build the Redis bridge first (lazyConnect) — both MQTT inbound (push to
+//     incoming) and outbound (BLMOVE from outgoing) need Redis to be ready.
+//  2. redis.start() opens the connection and resolves on 'ready'. If Redis is
+//     unreachable, this rejects and we exit fatal.
+//  3. Once Redis is up, start the MQTT client. Its 'connect' handler triggers
+//     the processing-queue replay, which Redis MUST be ready to serve.
+const redis: RedisBridge = createRedisBridge(config, { logger });
+
+void (async (): Promise<void> => {
+  try {
+    await redis.start();
+  } catch (err) {
+    logger.fatal({ err }, 'redis failed to start, exiting');
+    process.exit(1);
+  }
+})();
+
 const mqtt = startMqttClient(config, redis, logger);
 
+// Reverse of startup: stop MQTT (drains outbound, publishes offline, ends),
+// then quit Redis. Bounded by SHUTDOWN_TIMEOUT_MS so a wedged peer can't
+// keep the process alive past its grace period.
 let shuttingDown = false;
 const shutdown = (signal: NodeJS.Signals): void => {
   if (shuttingDown) {
