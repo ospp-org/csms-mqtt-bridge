@@ -402,3 +402,209 @@ describe('createRedisBridge — quit', () => {
     await expect(bridge.quit()).resolves.toBeUndefined();
   });
 });
+
+// ── Separate blocking client (BLMOVE HOL-blocking fix) ─────────────────────
+//
+// With a single ioredis connection, the 5s blocking BLMOVE serialized any
+// concurrent LPUSH (inbound MQTT) behind it, gating PUBACK and causing
+// broker re-delivery. createRedisBridge now uses a dedicated `blockingClient`
+// (via client.duplicate() in production) so non-blocking ops never wait
+// behind an active BLMOVE.
+describe('createRedisBridge — separate blocking client', () => {
+  it('routes BLMOVE to blockingClient, not the main client', async () => {
+    const fakeMain = makeFakeRedisClient();
+    const fakeBlocking = makeFakeRedisClient();
+    fakeBlocking.blmove = vi.fn((): Promise<string | null> => Promise.resolve(null));
+    const bridge = createRedisBridge(validConfig, {
+      client: fakeMain as unknown as Redis,
+      blockingClient: fakeBlocking as unknown as Redis,
+    });
+
+    await bridge.popOutgoingReliable();
+
+    expect(fakeBlocking.blmove).toHaveBeenCalledTimes(1);
+    expect(fakeMain.blmove).not.toHaveBeenCalled();
+  });
+
+  it('routes LPUSH (pushIncoming) to the main client, not blockingClient', async () => {
+    const fakeMain = makeFakeRedisClient();
+    const fakeBlocking = makeFakeRedisClient();
+    const bridge = createRedisBridge(validConfig, {
+      client: fakeMain as unknown as Redis,
+      blockingClient: fakeBlocking as unknown as Redis,
+    });
+
+    await bridge.pushIncoming({
+      version: 1,
+      topic: 'ospp/v1/stations/stn_00000001/to-server',
+      stationId: 'stn_00000001',
+      payload: 'aGVsbG8=',
+      qos: 1,
+      receivedAt: '2026-05-16T00:00:00.000Z',
+      messageId: '00000000-0000-0000-0000-000000000001',
+      properties: null,
+    });
+
+    expect(fakeMain.lpush).toHaveBeenCalledTimes(1);
+    expect(fakeBlocking.lpush).not.toHaveBeenCalled();
+  });
+
+  it('LPUSH resolves while BLMOVE is still pending (no head-of-line blocking)', async () => {
+    const fakeMain = makeFakeRedisClient();
+    const fakeBlocking = makeFakeRedisClient();
+
+    // Pending blmove — only resolves when we say so. Mirrors a real 5s blocking
+    // pop sitting in the kernel TCP buffer.
+    let resolveBlmove: ((value: string | null) => void) | undefined;
+    fakeBlocking.blmove = vi.fn(
+      (): Promise<string | null> =>
+        new Promise<string | null>((res) => {
+          resolveBlmove = res;
+        }),
+    );
+
+    const bridge = createRedisBridge(validConfig, {
+      client: fakeMain as unknown as Redis,
+      blockingClient: fakeBlocking as unknown as Redis,
+    });
+
+    // Start the pop — it pends indefinitely on fakeBlocking.blmove.
+    const popP = bridge.popOutgoingReliable();
+    // Yield so the pop's microtask actually starts before we time pushIncoming.
+    await Promise.resolve();
+
+    const t0 = Date.now();
+    await bridge.pushIncoming({
+      version: 1,
+      topic: 'ospp/v1/stations/stn_00000001/to-server',
+      stationId: 'stn_00000001',
+      payload: 'aGVsbG8=',
+      qos: 1,
+      receivedAt: '2026-05-16T00:00:00.000Z',
+      messageId: '00000000-0000-0000-0000-000000000002',
+      properties: null,
+    });
+    const elapsed = Date.now() - t0;
+
+    // LPUSH on the main fake is a vi.fn that resolves synchronously; if the
+    // two-client architecture regressed to a single client, the pending blmove
+    // would not block this since fakes don't model TCP-level HOL — but this
+    // also asserts the structural invariant that pushIncoming did NOT await
+    // anything on the blocking client.
+    expect(elapsed).toBeLessThan(50);
+    expect(fakeMain.lpush).toHaveBeenCalledTimes(1);
+    expect(fakeBlocking.blmove).toHaveBeenCalledTimes(1);
+
+    // Cleanup so the pending pop promise resolves.
+    resolveBlmove?.(null);
+    await popP;
+  });
+
+  it('start() connects both clients concurrently', async () => {
+    const fakeMain = makeFakeRedisClient();
+    const fakeBlocking = makeFakeRedisClient();
+    fakeMain.status = 'wait';
+    fakeBlocking.status = 'wait';
+    const bridge = createRedisBridge(validConfig, {
+      client: fakeMain as unknown as Redis,
+      blockingClient: fakeBlocking as unknown as Redis,
+    });
+
+    await bridge.start();
+
+    expect(fakeMain.connect).toHaveBeenCalledTimes(1);
+    expect(fakeBlocking.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('start() skips connect on whichever client is already ready', async () => {
+    const fakeMain = makeFakeRedisClient();
+    const fakeBlocking = makeFakeRedisClient();
+    fakeMain.status = 'ready';
+    fakeBlocking.status = 'wait';
+    const bridge = createRedisBridge(validConfig, {
+      client: fakeMain as unknown as Redis,
+      blockingClient: fakeBlocking as unknown as Redis,
+    });
+
+    await bridge.start();
+
+    expect(fakeMain.connect).not.toHaveBeenCalled();
+    expect(fakeBlocking.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('quit() quits both clients', async () => {
+    const fakeMain = makeFakeRedisClient();
+    const fakeBlocking = makeFakeRedisClient();
+    const bridge = createRedisBridge(validConfig, {
+      client: fakeMain as unknown as Redis,
+      blockingClient: fakeBlocking as unknown as Redis,
+    });
+
+    await bridge.quit();
+
+    expect(fakeMain.quit).toHaveBeenCalledTimes(1);
+    expect(fakeBlocking.quit).toHaveBeenCalledTimes(1);
+  });
+
+  it('quit() tolerates either client rejecting', async () => {
+    const fakeMain = makeFakeRedisClient();
+    const fakeBlocking = makeFakeRedisClient();
+    fakeBlocking.quit = vi.fn(
+      (): Promise<'OK'> => Promise.reject(new Error('blocking already closed')),
+    );
+    const bridge = createRedisBridge(validConfig, {
+      client: fakeMain as unknown as Redis,
+      blockingClient: fakeBlocking as unknown as Redis,
+    });
+
+    await expect(bridge.quit()).resolves.toBeUndefined();
+    expect(fakeMain.quit).toHaveBeenCalledTimes(1);
+  });
+
+  it('isReady() requires BOTH clients to be ready', () => {
+    const fakeMain = makeFakeRedisClient();
+    const fakeBlocking = makeFakeRedisClient();
+    const bridge = createRedisBridge(validConfig, {
+      client: fakeMain as unknown as Redis,
+      blockingClient: fakeBlocking as unknown as Redis,
+    });
+
+    fakeMain.status = 'ready';
+    fakeBlocking.status = 'wait';
+    expect(bridge.isReady()).toBe(false);
+
+    fakeMain.status = 'wait';
+    fakeBlocking.status = 'ready';
+    expect(bridge.isReady()).toBe(false);
+
+    fakeMain.status = 'ready';
+    fakeBlocking.status = 'ready';
+    expect(bridge.isReady()).toBe(true);
+  });
+
+  it('falls back to the single injected client when blockingClient is omitted (backward-compat)', async () => {
+    const fake = makeFakeRedisClient();
+    fake.blmove = vi.fn((): Promise<string | null> => Promise.resolve(null));
+    const bridge = createRedisBridge(validConfig, { client: fake as unknown as Redis });
+
+    // BLMOVE and LPUSH both land on the single injected fake — preserves the
+    // pre-fix injection surface used by all existing tests.
+    await bridge.popOutgoingReliable();
+    await bridge.pushIncoming({
+      version: 1,
+      topic: 'ospp/v1/stations/stn_00000001/to-server',
+      stationId: 'stn_00000001',
+      payload: 'aGVsbG8=',
+      qos: 1,
+      receivedAt: '2026-05-16T00:00:00.000Z',
+      messageId: '00000000-0000-0000-0000-000000000003',
+      properties: null,
+    });
+
+    expect(fake.blmove).toHaveBeenCalledTimes(1);
+    expect(fake.lpush).toHaveBeenCalledTimes(1);
+    // quit() should only quit once, since both refs point to the same fake.
+    await bridge.quit();
+    expect(fake.quit).toHaveBeenCalledTimes(1);
+  });
+});

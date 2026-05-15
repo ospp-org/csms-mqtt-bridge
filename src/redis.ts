@@ -121,33 +121,39 @@ const retryStrategy = (times: number): number => {
   return base + jitter;
 };
 
-const wireLifecycleEvents = (redis: Redis, logger: Logger): void => {
+const wireLifecycleEvents = (redis: Redis, logger: Logger, label: string): void => {
   redis.on('connect', () => {
-    logger.debug('redis socket connected');
+    logger.debug({ client: label }, 'redis socket connected');
   });
   redis.on('ready', () => {
     state.redisConnected = true;
-    logger.info('redis ready');
+    logger.info({ client: label }, 'redis ready');
   });
   redis.on('reconnecting', (delayMs: number) => {
-    logger.warn({ delayMs }, 'redis reconnecting');
+    logger.warn({ client: label, delayMs }, 'redis reconnecting');
   });
   redis.on('error', (err: Error) => {
-    logger.error({ err }, 'redis client error');
+    logger.error({ client: label, err }, 'redis client error');
   });
   redis.on('close', () => {
     state.redisConnected = false;
-    logger.warn('redis connection closed');
+    logger.warn({ client: label }, 'redis connection closed');
   });
   redis.on('end', () => {
     state.redisConnected = false;
-    logger.warn('redis connection ended');
+    logger.warn({ client: label }, 'redis connection ended');
   });
 };
 
 interface CreateRedisBridgeOpts {
   /** Inject a pre-built ioredis client (tests). When provided, no listeners are wired. */
   client?: Redis;
+  /**
+   * Inject a separate ioredis client for blocking commands (tests). Falls back
+   * to `client` when not provided, so existing single-client tests keep working
+   * unchanged. In production, this is constructed via `client.duplicate()`.
+   */
+  blockingClient?: Redis;
   /** Logger for lifecycle events. Required when `client` is not provided. */
   logger?: Logger;
 }
@@ -156,7 +162,7 @@ export const createRedisBridge = (
   config: Config,
   opts: CreateRedisBridgeOpts = {},
 ): RedisBridge => {
-  const { client: injected, logger } = opts;
+  const { client: injected, blockingClient: injectedBlocking, logger } = opts;
 
   const redis =
     injected ??
@@ -169,8 +175,15 @@ export const createRedisBridge = (
       retryStrategy,
     });
 
+  // Dedicated connection for BLMOVE. With a single connection, the 5s blocking
+  // pop serializes any concurrent LPUSH (inbound MQTT → Redis) behind it,
+  // which gates PUBACK and triggers broker re-delivery. duplicate() inherits
+  // all options (lazyConnect, retryStrategy, …) so start()/quit() drive both.
+  const redisBlocking = injectedBlocking ?? injected ?? redis.duplicate();
+
   if (!injected && logger) {
-    wireLifecycleEvents(redis, logger);
+    wireLifecycleEvents(redis, logger, 'redis');
+    wireLifecycleEvents(redisBlocking, logger, 'redis-blocking');
   }
 
   const ackOf = (raw: string) => async (): Promise<void> => {
@@ -179,10 +192,14 @@ export const createRedisBridge = (
 
   return {
     async start() {
-      if (redis.status === 'ready') return;
       // ioredis: status === 'wait' (lazy) or 'connecting'/'connect'/'reconnecting' here.
       // connect() resolves when 'ready' is emitted (or rejects on failure).
-      await redis.connect();
+      const connects: Promise<unknown>[] = [];
+      if (redis.status !== 'ready') connects.push(redis.connect());
+      if (redisBlocking !== redis && redisBlocking.status !== 'ready') {
+        connects.push(redisBlocking.connect());
+      }
+      await Promise.all(connects);
     },
 
     async pushIncoming(envelope) {
@@ -190,7 +207,7 @@ export const createRedisBridge = (
     },
 
     async popOutgoingReliable() {
-      const raw = await redis.blmove(
+      const raw = await redisBlocking.blmove(
         config.REDIS_QUEUE_OUTGOING,
         config.REDIS_QUEUE_PROCESSING,
         'LEFT',
@@ -240,10 +257,17 @@ export const createRedisBridge = (
       } catch {
         // ignore
       }
+      if (redisBlocking !== redis) {
+        try {
+          await redisBlocking.quit();
+        } catch {
+          // ignore
+        }
+      }
     },
 
     isReady() {
-      return redis.status === 'ready';
+      return redis.status === 'ready' && redisBlocking.status === 'ready';
     },
   };
 };
