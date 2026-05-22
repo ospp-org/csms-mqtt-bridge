@@ -521,6 +521,33 @@ describe('startMqttClient — inbound (handleMessage manual ack)', () => {
     expect(fakeRedis.pushed).toHaveLength(0);
   });
 
+  // I-1 observability — Sprint Fix Issues Post-Validation 2026-05-22
+  it.each<[string, 'non_compliant_station_id' | 'wrong_topic_format' | 'other']>([
+    ['ospp/v1/stations/stn_smoke3fe34372/to-server', 'non_compliant_station_id'],
+    ['ospp/v1/stations/stn_00000001/to-server/extra', 'wrong_topic_format'],
+    ['random/garbage/topic', 'other'],
+  ])(
+    'increments topicDropsTotal{reason=%s} when dropping "%s"',
+    async (topic, expectedReason) => {
+      const { topicDropsTotal } = await import('../metrics.js');
+      const readCount = async (reason: string): Promise<number> => {
+        const snapshot = await topicDropsTotal.get();
+        const found = snapshot.values.find((v) => v.labels.reason === reason);
+        return found?.value ?? 0;
+      };
+      const before = await readCount(expectedReason);
+
+      const fakeClient = makeFakeClient();
+      const fakeRedis = makeFakeRedis();
+      start(validConfig, fakeRedis, () => fakeClient as unknown as MqttClient);
+      const result = await callHandleMessage(fakeClient, makePacket(topic, Buffer.from('x')));
+
+      expect(result).toBeUndefined();
+      expect(fakeRedis.pushed).toHaveLength(0);
+      expect((await readCount(expectedReason)) - before).toBe(1);
+    },
+  );
+
   it('handles payload as string (rare mqtt.js path)', async () => {
     const fakeClient = makeFakeClient();
     const fakeRedis = makeFakeRedis();

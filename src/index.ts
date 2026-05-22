@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -6,6 +8,7 @@ import pino from 'pino';
 
 import type { Config } from './config.js';
 import { ConfigError, loadConfig, sanitizedConfigForLog } from './config.js';
+import { register as metricsRegister } from './metrics.js';
 import { startMqttClient } from './mqtt.js';
 import type { RedisBridge } from './redis.js';
 import { createRedisBridge } from './redis.js';
@@ -71,6 +74,37 @@ void (async (): Promise<void> => {
 
 const mqtt = startMqttClient(config, redis, logger);
 
+const metricsServer: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
+  const url = req.url ?? '/';
+  if (url === '/metrics' || url.startsWith('/metrics?')) {
+    void metricsRegister
+      .metrics()
+      .then((body) => {
+        res.writeHead(200, { 'Content-Type': metricsRegister.contentType });
+        res.end(body);
+      })
+      .catch((err: unknown) => {
+        logger.error({ err }, 'metrics endpoint failed to render');
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('metrics render failed');
+      });
+    return;
+  }
+  if (url === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('ok');
+    return;
+  }
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('not found');
+});
+metricsServer.listen(config.METRICS_PORT, () => {
+  logger.info(
+    { port: config.METRICS_PORT, endpoints: ['/metrics', '/healthz'] },
+    'metrics http server listening',
+  );
+});
+
 // Reverse of startup: stop MQTT (drains outbound, publishes offline, ends),
 // then quit Redis. Bounded by SHUTDOWN_TIMEOUT_MS so a wedged peer can't
 // keep the process alive past its grace period.
@@ -96,6 +130,11 @@ const shutdown = (signal: NodeJS.Signals): void => {
     try {
       await mqtt.stop();
       await redis.quit();
+      await new Promise<void>((resolve) => {
+        metricsServer.close(() => {
+          resolve();
+        });
+      });
       logger.info('shutdown complete');
       process.exit(0);
     } catch (err) {

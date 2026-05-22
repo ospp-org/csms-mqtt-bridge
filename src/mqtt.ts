@@ -14,6 +14,7 @@ import type {
 import type { Logger } from 'pino';
 
 import type { Config } from './config.js';
+import { classifyDropReason, topicDropsTotal } from './metrics.js';
 import type { IncomingEnvelope, OutgoingEnvelope, RedisBridge, ReliableOutgoing } from './redis.js';
 import { ENVELOPE_VERSION } from './redis.js';
 import { state } from './state.js';
@@ -104,8 +105,21 @@ const handleInbound = async (
   const stationId = parseStationFromTopic(topic);
   if (stationId === null) {
     // Acking on drop is intentional — a "garbage" topic should not be redelivered
-    // on every reconnect. Log warn so it's still visible.
-    logger.warn({ topic }, 'received message on unexpected topic, dropping (will ack)');
+    // on every reconnect. Counter + structured log let ops detect the silent-drop
+    // case from outside (Sprint Manual Validation Prod 2026-05-22, I-1 finding:
+    // operator hit a 15s sim timeout with no operator-visible cause because the
+    // warn-level log was the only signal and there was no metric to alert on).
+    const reason = classifyDropReason(topic);
+    topicDropsTotal.inc({ reason });
+    logger.warn(
+      {
+        event: 'topic_dropped',
+        topic,
+        reason,
+        mqttPacketId: packet.messageId ?? null,
+      },
+      'received message on unexpected topic, dropping (will ack)',
+    );
     return;
   }
 
