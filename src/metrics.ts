@@ -31,7 +31,7 @@ collectDefaultMetrics({ register });
  *     suffix, etc). Indicates client misuse of the topic convention.
  *
  *   other — topic isn't in `ospp/v1/stations/...` at all. Usually broker
- *     misconfig (shared subscription pattern is wrong, ACL bypass, etc).
+ *     misconfig (subscription topic filter is wrong, ACL bypass, etc).
  *
  * The bridge silently dropped these before this counter existed — silent
  * drops were caught only by an operator running a sim and seeing timeouts

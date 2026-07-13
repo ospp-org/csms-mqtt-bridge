@@ -23,7 +23,7 @@ import {
   buildClientOptions,
   parseStationFromTopic,
   serverStatusTopicFor,
-  SHARED_SUB_TOPIC,
+  STATION_INBOUND_TOPIC,
   startMqttClient,
 } from '../mqtt.js';
 import type {
@@ -308,18 +308,18 @@ describe('buildClientOptions', () => {
     expect(typeof willPayload['ts']).toBe('number');
   });
 
-  it('retains the shared subscriber session across a brief disconnect (AUDIT-05 F-02)', () => {
-    // The shared subscriber is the ONLY durable recipient of station→server QoS-1
-    // messages. `clean: false` alone is not enough under MQTT 5: an ABSENT Session
-    // Expiry Interval is treated as ZERO, so the broker deletes this session (and its
-    // subscription) the instant the bridge disconnects. During a bridge restart or
-    // broker-link partition EMQX would then ack a station's QoS-1 publish with no
-    // server subscription behind it — the envelope is dropped, never reaches Redis, and
-    // PHP pending-recovery has nothing to replay. A lone SessionEnded / accepted command
-    // response / fault / meter report is lost precisely during the partition it must
-    // survive. The spec pairs Clean Start=false with Session Expiry Interval=3600
-    // (spec/spec/02-transport.md:35-49); the station simulator already sends it.
-    // RED on 91e4e42: `sessionExpiryInterval` is undefined.
+  it('advertises the session-persistence CONNECT knobs F-02 needs (necessary, NOT sufficient)', () => {
+    // AUDIT-05 F-02. These three config values are NECESSARY for the broker to retain
+    // this bridge's session + subscription + queued QoS-1 messages across a disconnect:
+    // protocolVersion 5 (MQTT 5), clean:false, and a non-zero Session Expiry Interval
+    // (an absent value is treated as ZERO → session deleted on disconnect). This is a
+    // config regression guard ONLY — it does NOT prove F-02 is closed. The first ship
+    // of ARC 9 passed exactly this assertion and was still broken on the wire, because
+    // the subscription was $share/ (EMQX drops offline shared-sub messages as
+    // no_subscriber) and stop() unsubscribed. The BEHAVIOURAL guarantee — a QoS-1
+    // message published while the bridge is down actually lands in mqtt:incoming after
+    // it restarts — is proven ON THE WIRE on UAT, not here. See the plain-subscription
+    // and no-unsubscribe-on-stop guards below for the two code-level fixes.
     const opts = buildClientOptions(validConfig);
 
     expect(opts.protocolVersion).toBe(5);
@@ -428,7 +428,7 @@ describe('startMqttClient', () => {
     expect(fakeClient.handleMessage).toBeDefined();
   });
 
-  it('subscribes to the shared topic on connect', async () => {
+  it('subscribes to the PLAIN station inbound topic on connect (not $share/) — F-02 fix', async () => {
     const fakeClient = makeFakeClient();
     const connector = vi.fn(
       (_url: string, _opts: IClientOptions) => fakeClient as unknown as MqttClient,
@@ -439,7 +439,10 @@ describe('startMqttClient', () => {
     await flushMicrotasks();
 
     expect(fakeClient.subscribe).toHaveBeenCalledTimes(1);
-    expect(fakeClient.subscribe.mock.calls[0]?.[0]).toBe(SHARED_SUB_TOPIC);
+    expect(fakeClient.subscribe.mock.calls[0]?.[0]).toBe(STATION_INBOUND_TOPIC);
+    // Regression guard: a shared subscription is what broke F-02 (EMQX drops offline
+    // shared-sub messages). The topic must be plain — never a `$share/` group.
+    expect(fakeClient.subscribe.mock.calls[0]?.[0]).not.toContain('$share/');
     expect(fakeClient.subscribe.mock.calls[0]?.[1]).toEqual({ qos: 1 });
   });
 
@@ -794,16 +797,21 @@ describe('startMqttClient — replay processing on first connect', () => {
 // ── Stop semantics ──────────────────────────────────────────────────────────
 
 describe('startMqttClient — stop()', () => {
-  it('unsubscribes, publishes offline, and ends the client', async () => {
+  it('does NOT unsubscribe on stop (keeps the subscription in the retained session) — F-02 fix', async () => {
     const fakeClient = makeFakeClient();
     const bridge = start(validConfig, makeFakeRedis(), () => fakeClient as unknown as MqttClient);
 
-    // Force connected state so stop() runs the unsubscribe + offline path.
+    // Force connected state so stop() runs the offline path.
     state.mqttConnected = true;
 
     await bridge.stop();
 
-    expect(fakeClient.unsubscribe).toHaveBeenCalledWith(SHARED_SUB_TOPIC, expect.any(Function));
+    // Regression guard for the second half of the F-02 fix: unsubscribing on shutdown
+    // removes the subscription from the persistent session, so QoS-1 messages published
+    // during the (usual) restart window would not be queued and would be lost — the exact
+    // failure. The bridge restarts far more often than it disappears, so it MUST keep the
+    // subscription; a genuinely permanent shutdown self-cleans via sessionExpiryInterval.
+    expect(fakeClient.unsubscribe).not.toHaveBeenCalled();
 
     const expectedStatusTopic = serverStatusTopicFor('csms-test-server-1');
     const offlineCall = fakeClient.publish.mock.calls.find((c) => {

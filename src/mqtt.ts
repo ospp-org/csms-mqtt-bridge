@@ -19,7 +19,26 @@ import type { IncomingEnvelope, OutgoingEnvelope, RedisBridge, ReliableOutgoing 
 import { ENVELOPE_VERSION } from './redis.js';
 import { state } from './state.js';
 
-export const SHARED_SUB_TOPIC = '$share/ospp-servers/ospp/v1/stations/+/to-server';
+/**
+ * Station→server inbound topic filter — a PLAIN (non-shared) subscription.
+ *
+ * AUDIT-05 F-02, fix-forward (2026-07-13): this was a shared subscription
+ * (`$share/ospp-servers/…`). On-wire UAT proof showed that when the lone
+ * shared-group member (this bridge) is offline, EMQX drops matching QoS-1
+ * messages as `no_subscriber` — a shared subscription is NOT retained/queued
+ * for an offline member, so `sessionExpiryInterval` alone could not close F-02.
+ * A plain subscription on a persistent session (clean:false + expiry) IS queued
+ * by the broker while the bridge is offline and redelivered on reconnect —
+ * standard MQTT session semantics.
+ *
+ * `$share/` bought nothing here: it load-balances across N consumers and there
+ * is one. HA is unaffected — run N bridges each with its own clientId + plain
+ * subscription: every instance receives every message, and MessageDispatcher's
+ * per-station dedup (AUDIT-05 F-04 / ARC 3, kept intact by ARC 8b) suppresses
+ * the duplicates server-side, where the guarantee is already proven. The cost
+ * ($share drops on offline) is removed; the benefit (dedup) is unchanged.
+ */
+export const STATION_INBOUND_TOPIC = 'ospp/v1/stations/+/to-server';
 
 /**
  * Per-instance retained status topic. Singleton `ospp/v1/server/status` would
@@ -65,10 +84,14 @@ export const buildClientOptions = (config: Config): IClientOptions => ({
   protocolVersion: 5,
   clean: false,
   // MQTT 5 CONNECT properties. sessionExpiryInterval is the companion to clean:false —
-  // it keeps this shared-subscriber session, and the QoS-1 messages the broker queues
-  // for it, alive across a brief disconnect. Without it the session expiry defaults to
-  // 0 and the subscription is deleted on disconnect, so station→server messages
-  // published during a bridge partition are acked-and-dropped (AUDIT-05 F-02).
+  // it keeps this bridge's session, its PLAIN subscription (STATION_INBOUND_TOPIC), and
+  // the QoS-1 messages the broker queues for that subscription, alive across a brief
+  // disconnect. Without it the session expiry defaults to 0 and the session (with its
+  // subscription + queued messages) is deleted on disconnect, so station→server messages
+  // published during a bridge partition are acked-and-dropped (AUDIT-05 F-02). NB: expiry
+  // is necessary but NOT sufficient — F-02 also required the subscription to be plain
+  // (not $share/, which EMQX never queues for an offline member) and stop() to NOT
+  // unsubscribe on shutdown (which would remove the subscription from the retained session).
   properties: { sessionExpiryInterval: config.MQTT_SESSION_EXPIRY_INTERVAL },
   keepalive: config.MQTT_KEEPALIVE,
   reconnectPeriod: config.MQTT_RECONNECT_PERIOD,
@@ -98,7 +121,7 @@ export const buildClientOptions = (config: Config): IClientOptions => ({
  * Push the inbound message to Redis. Returns normally on success or on a
  * deliberate drop (unknown topic — drop the message and ack to broker).
  * Throws if the Redis push fails — caller MUST translate that into a no-ack
- * so the broker re-delivers on reconnect / share-group rebalance.
+ * so the broker re-delivers on reconnect.
  */
 const handleInbound = async (
   packet: IPublishPacket,
@@ -302,12 +325,14 @@ const registerLifecycleListeners = (
       },
     );
 
-    client.subscribe(SHARED_SUB_TOPIC, { qos: 1 }, (err, granted) => {
+    client.subscribe(STATION_INBOUND_TOPIC, { qos: 1 }, (err, granted) => {
       if (err) {
         logger.error({ err }, 'subscribe failed');
         return;
       }
-      logger.info({ granted }, 'subscribed to shared topic');
+      // Idempotent: on a resumed session (sessionPresent:true) the subscription
+      // already exists; re-subscribing is a no-op that just re-confirms the grant.
+      logger.info({ granted }, 'subscribed to station inbound topic');
     });
 
     if (!hasReplayedOnStartup) {
@@ -391,12 +416,14 @@ export const startMqttClient = (
     outbound.stop();
 
     if (state.mqttConnected) {
-      await new Promise<void>((resolve) => {
-        client.unsubscribe(SHARED_SUB_TOPIC, () => {
-          resolve();
-        });
-      });
-
+      // Deliberately do NOT unsubscribe here. This bridge shuts down to RESTART
+      // (deploy) far more often than to disappear. Unsubscribing removes the
+      // subscription from the persistent session, so QoS-1 station→server messages
+      // published during the restart window would not be queued and would be lost —
+      // the exact AUDIT-05 F-02 failure. Leaving the subscription in place lets the
+      // broker queue those messages and redeliver them on reconnect. A genuinely
+      // permanent shutdown self-cleans when the session expires (sessionExpiryInterval).
+      // The LWT (will) plus this explicit publish still announce the bridge offline.
       await new Promise<void>((resolve) => {
         client.publish(
           serverStatusTopicFor(config.MQTT_CLIENT_ID),
