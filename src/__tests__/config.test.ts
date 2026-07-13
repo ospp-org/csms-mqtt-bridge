@@ -51,6 +51,7 @@ describe('loadConfig — happy paths', () => {
     expect(cfg.MQTT_KEEPALIVE).toBe(60);
     expect(cfg.MQTT_RECONNECT_PERIOD).toBe(5_000);
     expect(cfg.MQTT_CONNECT_TIMEOUT).toBe(30_000);
+    expect(cfg.MQTT_SESSION_EXPIRY_INTERVAL).toBe(3600);
     expect(cfg.MQTT_REJECT_UNAUTHORIZED).toBe(true);
     expect(cfg.REDIS_QUEUE_INCOMING).toBe('mqtt:incoming');
     expect(cfg.REDIS_QUEUE_OUTGOING).toBe('mqtt:outgoing');

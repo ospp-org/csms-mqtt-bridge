@@ -91,6 +91,7 @@ for a copy-paste starting point.
 | `MQTT_KEEPALIVE`           | `60`            | MQTT keepalive interval, in seconds.                                                                                                                                  |
 | `MQTT_RECONNECT_PERIOD`    | `5000`          | MQTT reconnect base period in ms (mqtt.js layers exponential backoff + jitter on top).                                                                                |
 | `MQTT_CONNECT_TIMEOUT`     | `30000`         | Initial connect deadline in ms.                                                                                                                                       |
+| `MQTT_SESSION_EXPIRY_INTERVAL` | `3600`      | MQTT 5 Session Expiry Interval in seconds; with `clean:false` keeps the shared subscription + its queued QoS-1 messages alive across a brief disconnect (must be > 0). |
 | `REDIS_QUEUE_INCOMING`     | `mqtt:incoming` | Redis list key for inbound messages from broker → server.                                                                                                             |
 | `REDIS_QUEUE_OUTGOING`     | `mqtt:outgoing` | Redis list key for outbound messages from server → broker.                                                                                                            |
 | `REDIS_BLPOP_TIMEOUT_SEC`  | `5`             | BLPOP block timeout when polling the outgoing queue, in seconds.                                                                                                      |

@@ -64,6 +64,12 @@ export const buildClientOptions = (config: Config): IClientOptions => ({
   clientId: config.MQTT_CLIENT_ID,
   protocolVersion: 5,
   clean: false,
+  // MQTT 5 CONNECT properties. sessionExpiryInterval is the companion to clean:false —
+  // it keeps this shared-subscriber session, and the QoS-1 messages the broker queues
+  // for it, alive across a brief disconnect. Without it the session expiry defaults to
+  // 0 and the subscription is deleted on disconnect, so station→server messages
+  // published during a bridge partition are acked-and-dropped (AUDIT-05 F-02).
+  properties: { sessionExpiryInterval: config.MQTT_SESSION_EXPIRY_INTERVAL },
   keepalive: config.MQTT_KEEPALIVE,
   reconnectPeriod: config.MQTT_RECONNECT_PERIOD,
   connectTimeout: config.MQTT_CONNECT_TIMEOUT,

@@ -281,6 +281,9 @@ describe('buildClientOptions', () => {
     expect(opts.clientId).toBe('csms-test-server-1');
     expect(opts.protocolVersion).toBe(5);
     expect(opts.clean).toBe(false);
+    // "persistent session" is clean:false PLUS a non-zero expiry — assert both, so the
+    // test name isn't a lie (AUDIT-05 F-02). Dedicated coverage below.
+    expect(opts.properties?.sessionExpiryInterval).toBe(3600);
     expect(opts.keepalive).toBe(60);
     expect(opts.reconnectPeriod).toBe(5000);
     expect(opts.connectTimeout).toBe(30_000);
