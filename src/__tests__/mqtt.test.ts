@@ -305,6 +305,39 @@ describe('buildClientOptions', () => {
     expect(typeof willPayload['ts']).toBe('number');
   });
 
+  it('retains the shared subscriber session across a brief disconnect (AUDIT-05 F-02)', () => {
+    // The shared subscriber is the ONLY durable recipient of station→server QoS-1
+    // messages. `clean: false` alone is not enough under MQTT 5: an ABSENT Session
+    // Expiry Interval is treated as ZERO, so the broker deletes this session (and its
+    // subscription) the instant the bridge disconnects. During a bridge restart or
+    // broker-link partition EMQX would then ack a station's QoS-1 publish with no
+    // server subscription behind it — the envelope is dropped, never reaches Redis, and
+    // PHP pending-recovery has nothing to replay. A lone SessionEnded / accepted command
+    // response / fault / meter report is lost precisely during the partition it must
+    // survive. The spec pairs Clean Start=false with Session Expiry Interval=3600
+    // (spec/spec/02-transport.md:35-49); the station simulator already sends it.
+    // RED on 91e4e42: `sessionExpiryInterval` is undefined.
+    const opts = buildClientOptions(validConfig);
+
+    expect(opts.protocolVersion).toBe(5);
+    expect(opts.clean).toBe(false);
+    expect(opts.properties?.sessionExpiryInterval).toBe(3600);
+  });
+
+  it('forwards a custom MQTT_SESSION_EXPIRY_INTERVAL', () => {
+    const cfg = loadConfig({
+      MQTT_BROKER_URL: 'mqtts://broker.test:8884',
+      MQTT_CLIENT_ID: 'csms-test-server-1',
+      MQTT_CERT_PATH: join(tmpDir, 'cert.pem'),
+      MQTT_KEY_PATH: join(tmpDir, 'key.pem'),
+      MQTT_CA_PATH: join(tmpDir, 'ca.pem'),
+      REDIS_URL: 'redis://redis.test:6379',
+      MQTT_SESSION_EXPIRY_INTERVAL: '7200',
+    });
+    const opts = buildClientOptions(cfg);
+    expect(opts.properties?.sessionExpiryInterval).toBe(7200);
+  });
+
   it('reflects MQTT_REJECT_UNAUTHORIZED=false in options', () => {
     const cfg = loadConfig({
       MQTT_BROKER_URL: 'mqtts://broker.test:8884',
