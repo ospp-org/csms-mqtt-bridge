@@ -1,5 +1,19 @@
 # AUDIT — UAT prod-mirror alignment (v2)
 
+> **FROZEN SNAPSHOT — superseded. Do not plan from this file.**
+>
+> This is the v2 copy taken on 2026-04-27, the plan that specified this bridge into
+> existence. It has not been revised since, while the live document in `csms-server`
+> (`AUDIT-UAT-PROD-MIRROR.md`, v3.5) has. Known drift in the text below: it names the
+> broker port as **8884** where the deployed listener is **8883**, and it describes an
+> outbound `mqtt:outgoing` flow that was never implemented.
+>
+> Kept for provenance — it records why the sidecar exists and what it was asked to do.
+> For current behaviour see [`../README.md`](../README.md),
+> [`REDIS-QUEUE-CONTRACT.md`](./REDIS-QUEUE-CONTRACT.md) and
+> [`AUDIT-MQTT-BRIDGE.md`](./AUDIT-MQTT-BRIDGE.md).
+
+
 **Date**: 2026-04-27
 **Version**: 2 (revised after CLI PASUL A verification + OSPP spec re-read)
 **Scope**: CSMS server UAT environment at api-uat.onestoppay.ro / mqtt-uat.onestoppay.ro:8884

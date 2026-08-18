@@ -547,6 +547,33 @@ describe('startMqttClient — inbound (handleMessage manual ack)', () => {
     expect(result?.message).toBe('redis down');
   });
 
+  // Characterisation, not a fix: this pins WHY docs/REDIS-QUEUE-CONTRACT.md must not
+  // tell consumers to dedupe on the envelope messageId. The bridge mints a fresh UUID
+  // per DELIVERY, so a broker re-delivery of the identical packet — the exact recovery
+  // scenario the contract names — carries a different envelope messageId and would not
+  // match. Deduplication belongs on the OSPP messageId inside the payload, which the
+  // bridge never touches. csms-server does exactly that (MessageDispatcher.php:219 via
+  // MessageFactory.php:109); the contract text was the only thing that was wrong.
+  it('mints a NEW envelope messageId per delivery — so it can never be a dedupe key', async () => {
+    const fakeClient = makeFakeClient();
+    const fakeRedis = makeFakeRedis();
+    start(validConfig, fakeRedis, () => fakeClient as unknown as MqttClient);
+
+    // The SAME packet delivered twice, as the broker does when an ack is missed.
+    const packet = makePacket(
+      'ospp/v1/stations/stn_00000001/to-server',
+      Buffer.from('{"messageId":"osp-identical","action":"MeterValues"}'),
+    );
+    await callHandleMessage(fakeClient, packet);
+    await callHandleMessage(fakeClient, packet);
+
+    expect(fakeRedis.pushed).toHaveLength(2);
+    const [first, second] = fakeRedis.pushed;
+    expect(first?.messageId).not.toBe(second?.messageId);
+    // …while the OSPP id inside the payload — the usable dedupe key — is identical.
+    expect(first?.payload).toBe(second?.payload);
+  });
+
   it('acks (callback() with no error) on invalid topic — drops garbage', async () => {
     const fakeClient = makeFakeClient();
     const fakeRedis = makeFakeRedis();
