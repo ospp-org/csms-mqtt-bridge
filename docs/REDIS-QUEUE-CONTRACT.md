@@ -5,9 +5,16 @@ queues between `csms-mqtt-bridge` (this service) and the csms-server
 worker (`php artisan mqtt:consume` — a standalone long-running command in its
 own container, NOT a Horizon job).
 
-Both sides MUST agree on this contract. Bridge is the producer for
-`mqtt:incoming` and the consumer for `mqtt:outgoing`; the csms-server
-worker is the opposite.
+Both sides MUST agree on this contract. The bridge is the producer for
+`mqtt:incoming`; the csms-server worker is the consumer.
+
+**This contract covers the inbound direction only.** Server→station traffic goes
+over the EMQX REST API (`EmqxApiPublisher` → `POST /api/v5/publish`), not over a
+Redis queue. A `mqtt:outgoing` / `mqtt:processing` pair was specified here in April
+2026 and implemented in the bridge; no producer was ever written, and the bridge
+side was removed in ADR-0001. Do not implement a producer against an earlier
+revision of this document — see [ADR-0001](./ADR-0001-outbound-path-removed.md),
+including why the schema it defined could not have carried today's traffic.
 
 ---
 
@@ -26,9 +33,11 @@ Every envelope carries an integer `version` field. The current value is
   versions for a deployment window, but each accepted version's shape
   MUST be preserved exactly.
 
-The bridge enforces this in `src/redis.ts` (`parseOutgoingEnvelope`); the
-canonical version constant is exported as `ENVELOPE_VERSION` from the
-same module.
+The canonical version constant is exported as `ENVELOPE_VERSION` from
+`src/redis.ts`, and the bridge stamps every envelope it produces with it. Since the
+queue is now one-directional, the bridge never *reads* an envelope — enforcement is
+the consumer's, in csms-server's `MqttConsume` (a `version !== 1` envelope is a hard
+failure routed straight to the DLQ, not retried).
 
 ---
 
@@ -37,18 +46,11 @@ same module.
 | Key               | Direction                | Producer            | Consumer                                      |
 | ----------------- | ------------------------ | ------------------- | --------------------------------------------- |
 | `mqtt:incoming`   | broker → bridge → worker | bridge (LPUSH)      | csms-server worker (`BLMOVE … RIGHT LEFT`)    |
-| `mqtt:outgoing`   | worker → bridge → broker | csms-server worker  | bridge (BLMOVE → `mqtt:processing`)           |
-| `mqtt:processing` | bridge-internal          | bridge (BLMOVE dst) | bridge (LREM after PUBACK; LRANGE on startup) |
 
-Keys are configurable via `REDIS_QUEUE_INCOMING`, `REDIS_QUEUE_OUTGOING`,
-and `REDIS_QUEUE_PROCESSING` env vars on the bridge side; csms-server's
-worker must read the same names for the first two from its config.
-`mqtt:processing` is bridge-internal — the worker should NOT touch it.
-
-`mqtt:processing` is currently a singleton, which is correct for
-single-instance deployments. Multi-instance HA (Phase F.7) will need
-per-instance suffixing (e.g. `mqtt:processing:csms-uat-server-1`) so that
-two bridges don't steal each other's in-flight messages.
+The key is configurable via `REDIS_QUEUE_INCOMING` on the bridge side;
+csms-server's worker must read the same name from its config
+(`MQTT_WORKER_QUEUE_INCOMING`). The worker owns its own `mqtt:incoming-pending:*`
+and `mqtt:incoming-dlq` keys, which the bridge never touches.
 
 ## 2.1. Redis server requirements
 
@@ -56,11 +58,11 @@ two bridges don't steal each other's in-flight messages.
   and matches what `csms-server`'s compose runs.
 - **Auth**: production runs with `--requirepass`; bridges use
   `redis://[:password]@host:port` URLs. TLS via `rediss://` is supported.
-- **Persistence**: AOF (`--appendonly yes`) is strongly recommended. With
-  AOF, the at-least-once guarantee survives a Redis restart — without it,
-  `mqtt:processing` and `mqtt:outgoing` items disappear on Redis crash and
-  the at-least-once contract degrades to "at-most-once with replay
-  best-effort".
+- **Persistence**: AOF (`--appendonly yes`) is strongly recommended. With AOF the
+  at-least-once guarantee survives a Redis restart; without it, un-consumed
+  `mqtt:incoming` items disappear on a Redis crash and the guarantee degrades to
+  at-most-once. Note this is a narrower window than it sounds: a message the bridge
+  has not yet ack'd is still held by the broker and will be redelivered.
 - **Memory policy**: `noeviction` is REQUIRED, and both sides now enforce it.
   Under an eviction policy an `LPUSH` reports success, the bridge PUBACKs, the
   broker drops its copy, and Redis discards the entry — the message is lost on
@@ -162,71 +164,19 @@ export interface IncomingEnvelope {
 
 ---
 
-## 4. Outgoing envelope — `mqtt:outgoing`
+## 4. Outgoing envelope — REMOVED
 
-The bridge consumes with `BLMOVE <outgoing> <processing> LEFT RIGHT`, decodes
-the base64 payload, and publishes via its persistent mTLS MQTT 5 connection.
+There is no outgoing envelope. Server→station traffic does not use a Redis queue;
+it goes over the EMQX REST API. The `OutgoingEnvelope` schema that stood here has
+been withdrawn along with the bridge code that consumed it — see
+[ADR-0001](./ADR-0001-outbound-path-removed.md).
 
-> **This direction has no producer.** Nothing in csms-server writes
-> `mqtt:outgoing`; server→station traffic goes over the EMQX REST API
-> (`EmqxApiPublisher` → `POST /api/v5/publish`). The schema below describes what
-> the bridge WOULD accept, not a path that carries traffic today.
-
-### TypeScript schema (`src/redis.ts`)
-
-```ts
-export interface OutgoingEnvelope {
-  version: 1;
-  topic: string;             // full MQTT topic to publish to
-  payload: string;           // base64 of the bytes to publish
-  qos: 0 | 1 | 2;
-  properties?: Record<string, unknown>;  // optional MQTT 5 properties
-}
-```
-
-### Field semantics
-
-- **`version`** (required) — `1`. Bridge rejects unknown versions.
-- **`topic`** (required) — full MQTT topic. The bridge does NOT validate
-  the topic shape against the OSPP `to-station` pattern at this layer;
-  validation lives upstream (the worker building the envelope is
-  expected to construct legal topics, e.g.
-  `ospp/v1/stations/{stationId}/to-station`).
-- **`payload`** (required) — base64 of the bytes to publish. Worker
-  must base64-encode before pushing (`base64_encode($bytes)`).
-- **`qos`** (required) — desired publish QoS. Bridge passes this
-  through to mqtt.js.
-- **`properties`** (optional) — MQTT 5 properties to attach. Same shape
-  as the inbound envelope's `properties`. Pass `userProperties` as
-  `{ key: string|string[] }` per MQTT 5 spec.
-
-### Example
-
-```json
-{
-  "version": 1,
-  "topic": "ospp/v1/stations/stn_00000001/to-station",
-  "payload": "eyJhY3Rpb24iOiJCb290Tm90aWZpY2F0aW9uUmVzcG9uc2UiLCJzdGF0dXMiOiJBY2NlcHRlZCJ9",
-  "qos": 1,
-  "properties": { "contentType": "application/json" }
-}
-```
-
-`atob(...)` → `{"action":"BootNotificationResponse","status":"Accepted"}`
-
-### Rejection cases (bridge-side)
-
-The bridge's `parseOutgoingEnvelope` rejects (with a `warn` log; the
-loop continues with the next envelope):
-
-- non-object root, or root is `null`
-- missing or non-`1` `version`
-- missing or empty `topic`
-- non-string `payload`
-- `qos` not in `{0, 1, 2}`
-- `properties` present but not an object (or `null`)
-
----
+It is withdrawn rather than merely marked unimplemented for a specific reason: the
+schema could not express what the server actually publishes. It had no `retain`
+field, and the server passes `retain` on every publish; `messageExpiryInterval` and
+`correlationData` had nowhere defined to sit. Anyone reviving this direction needs a
+new schema, not this one — and a shape that looks authoritative but silently drops
+fields is worse than no shape at all.
 
 ## 5. Reliability semantics
 
@@ -253,23 +203,6 @@ A message on an unrecognized topic (failing the
 `^ospp/v1/stations/stn_[a-f0-9]{8,60}/to-server$` regex) is **dropped
 and acked**: re-delivering a malformed topic on every reconnect is worse
 than dropping it. The drop is logged at `warn`.
-
-### Outbound: worker → Redis → bridge → broker
-
-The bridge consumes outbound with `BLMOVE mqtt:outgoing mqtt:processing
-LEFT RIGHT`. Once the broker confirms the publish (PUBACK for QoS 1 /
-PUBCOMP for QoS 2), the bridge removes the same raw JSON string from
-`mqtt:processing` with `LREM mqtt:processing 1 <raw>`.
-
-If the bridge crashes between BLMOVE and a successful PUBACK, the raw
-envelope is still in `mqtt:processing`. On the next startup, the bridge
-calls `LRANGE mqtt:processing 0 -1`, parses each item, and republishes
-+ acks. Failed replays stay in `mqtt:processing` for the next attempt.
-
-If the bridge encounters a malformed envelope (during BLMOVE-then-parse
-or during startup replay), it removes the bad raw string from
-`mqtt:processing` (`LREM`) and logs an error. We don't replay garbage
-forever.
 
 ### Worker requirements
 
@@ -300,7 +233,7 @@ forever.
 
 ---
 
-## 6. Compatibility checklist for the csms-server worker (Phase 0.8)
+## 6. Compatibility checklist for the csms-server worker
 
 When implementing the consumer side:
 
@@ -314,10 +247,7 @@ When implementing the consumer side:
   every delivery and cannot match a re-delivery. See §5.
 - [ ] Use `receivedAt` for end-to-end latency metrics, and log the envelope
   `messageId` as a per-delivery trace id.
-- [ ] Outbound does not use this queue today — responses go over the EMQX REST
-  API. If that ever changes, write to `mqtt:outgoing` with `RPUSH`,
-  `version: 1`, base64-encoded payload, and a topic that follows
-  `ospp/v1/stations/{stationId}/to-station`.
-- [ ] Do NOT touch `mqtt:processing` — that is bridge-internal.
 - [ ] Don't include MQTT packet IDs or session-specific fields — the
   bridge is responsible for those.
+- [ ] Publish responses via the EMQX REST API (`EmqxApiPublisher`), not via this
+  queue. See [ADR-0001](./ADR-0001-outbound-path-removed.md).

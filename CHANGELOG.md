@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The Redis outbound path, in full** — the `BLMOVE` loop, `mqtt:processing`, the
+  startup replay, `parseOutgoingEnvelope`, the `OutgoingEnvelope` and
+  `ReliableOutgoing` types, `REDIS_QUEUE_OUTGOING` / `REDIS_QUEUE_PROCESSING` /
+  `REDIS_BLPOP_TIMEOUT_SEC`, `state.inflightOutbound`, the dedicated `duplicate()`
+  ioredis client, and **47 tests** (198 → 151). No producer ever existed in
+  csms-server; server→station goes over the EMQX REST API. The types went too because
+  the schema had no `retain` field the server passes on every publish — it could not
+  have carried today's traffic. See
+  [ADR-0001](./docs/ADR-0001-outbound-path-removed.md), which also records the
+  still-OPEN "not OSPP-compliant" verdict on the REST publisher, and the deliberate
+  divergence from the spec's SHOULD on shared subscriptions.
+
+### Added
+
+- **`assertQueueDurable()`** — the bridge refuses to start when the queue Redis
+  reports a `maxmemory-policy` other than `noeviction`. Under an eviction policy an
+  `LPUSH` reports success, the bridge PUBACKs, the broker drops its copy, and Redis
+  discards the entry: measured 400 pushes → 400 acked, 16 surviving. Fails **closed**
+  on an undeterminable policy. New `REDIS_REQUIRE_NOEVICTION`, default `true`.
+- **`src/bootstrap.ts`** — genuinely ordered startup: `start()` →
+  `assertQueueDurable()` → only then the MQTT client. A refusal is only safe if
+  nothing was accepted first. The documented ordering was previously not implemented.
+- **`src/health.ts`** — `/healthz` returns **503** unless the bridge holds a broker
+  connection *and* Redis is ready, with a JSON body naming the failing leg. It
+  previously returned 200 unconditionally. `HEALTHCHECK` added to the image.
+- **Metrics**: `csms_bridge_build_info{version}`,
+  `csms_bridge_inbound_push_failures_total`,
+  `csms_bridge_queue_durability_violations_total{policy}`, and gauges for every
+  `state.ts` field, collected at scrape time.
+- **Integration test against a real Redis** (`eviction.integration.test.ts`), run by
+  CI against a redis service, with an anti-vacuity guard and a case that fails the
+  build if it is ever silently skipped.
+
+### Fixed
+
+- `docs/REDIS-QUEUE-CONTRACT.md` told consumers to dedupe on the envelope
+  `messageId`, which the bridge regenerates on every delivery — so in the very
+  re-delivery scenario it named, it could never match. Corrected to the OSPP
+  `messageId` inside the payload, which is what csms-server always used.
+- Stale mechanics across the contract, README and `package.json`: `$share/`
+  subscription, `BLPOP`, `BRPOP`, "Horizon worker".
+
 ### Changed
 
 - `src/index.ts` startup log: replaced stale `phase: '0.5'` field with

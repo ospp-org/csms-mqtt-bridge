@@ -16,8 +16,8 @@ roadmap.
 | 0.1   | POC — `mqtt@5` + Node 22 + mTLS round-trip against UAT EMQX (~469 ms, zero compatibility issues)                                                               | done    |
 | 0.2   | Repo bootstrap (TypeScript strict, ESLint flat, Dockerfile, CI)                                                                                                | done    |
 | 0.3   | Typed env-var loader (`zod` v4) with file-existence + protocol checks; insecure-TLS warning                                                                    | done    |
-| 0.4   | MQTT client wrapper: persistent mTLS, MQTT 5, plain persistent subscription, LWT, reconnect logging, outbound BLMOVE loop                                      | done    |
-| 0.5   | At-least-once delivery — manual-ack inbound + BLMOVE outbound + startup replay                                                                                 | done    |
+| 0.4   | MQTT client wrapper: persistent mTLS, MQTT 5, plain persistent subscription, LWT, reconnect logging                                                            | done    |
+| 0.5   | At-least-once delivery — manual-ack inbound (outbound half removed, ADR-0001)                                                                                  | done    |
 | 0.6   | Server cert provisioning (artisan command in `csms-server`)                                                                                                    | next    |
 | 0.7a  | GHCR auto-publish (multi-arch Docker image on `v*.*.*` tag push)                                                                                               | done    |
 | 0.7b+ | csms-server compose integration, `mqtt:consume` worker, tests, decommissioning the legacy webhook path — inbound done; outbound never wired (see Architecture) | partial |
@@ -25,16 +25,15 @@ roadmap.
 ## Architecture
 
 ```
-                                    inbound
-                       ────────────────────────────▶
-   ┌──────────────┐    mTLS MQTT     ┌──────────────┐    mTLS MQTT     ┌──────────────────┐    Redis LIST    ┌────────────────┐
-   │              │                  │              │ ospp/v1/stations │                  │  mqtt:incoming   │                │
-   │   Stations   │◀────────────────▶│ EMQX broker  │◀────────────────▶│ csms-mqtt-bridge │◀────────────────▶│  csms-server   │
-   │ CN: stn_*    │  port 8883/8884  │  (clustered) │  CN: csms-*-srv  │  (this service)  │  mqtt:outgoing   │   (Laravel)    │
-   │              │                  │              │                  │                  │                  │                │
-   └──────────────┘                  └──────────────┘                  └──────────────────┘                  └────────────────┘
-                       ◀────────────────────────────
-                                    outbound
+   INBOUND  (this service)
+   ┌──────────────┐   mTLS MQTT    ┌──────────────┐   mTLS MQTT    ┌──────────────────┐  Redis LIST   ┌────────────────┐
+   │   Stations   │ ──────────────▶│ EMQX broker  │ ──────────────▶│ csms-mqtt-bridge │ ─────────────▶│  csms-server   │
+   │ CN: stn_*    │  to-server     │  (clustered) │  plain sub     │  (this service)  │ mqtt:incoming │   (Laravel)    │
+   └──────────────┘  QoS 1         └──────────────┘  CN: csms-*-srv└──────────────────┘  LPUSH        └────────────────┘
+          ▲                               ▲                                                                   │
+          │                               │            EMQX REST API — POST /api/v5/publish                    │
+          └───────────────────────────────┴───────────────────────────────────────────────────────────────────┘
+                                    OUTBOUND  (does NOT pass through this service)
 ```
 
 - **Inbound**: bridge subscribes to `ospp/v1/stations/+/to-server` — a PLAIN
@@ -43,10 +42,10 @@ roadmap.
   worker consumes it with `BLMOVE … RIGHT LEFT` (FIFO) and dispatches.
   `$share/` was dropped in `2ba00e8`: EMQX does not queue a shared subscription's
   messages for an offline member, so a bridge restart dropped them (AUDIT-05 F-02).
-- **Outbound**: bridge `BLMOVE`s from `mqtt:outgoing` into `mqtt:processing`, then
-  publishes to `ospp/v1/stations/{id}/to-station`. **This direction carries no
-  traffic**: nothing in csms-server writes `mqtt:outgoing` — server→station goes
-  over the EMQX REST API (`EmqxApiPublisher` → `POST /api/v5/publish`).
+- **Outbound**: not this service. Server→station traffic goes over the EMQX REST
+  API (`EmqxApiPublisher` → `POST /api/v5/publish`). The bridge had a Redis-queue
+  outbound half; it never had a producer and was removed — see
+  [ADR-0001](./docs/ADR-0001-outbound-path-removed.md).
 - **Identity**: bridge authenticates with a server certificate signed by the
   Station CA; the CN convention is `csms-<env>-server-<N>` (e.g. `csms-uat-server-1`).
   EMQX maps the CN to the MQTT clientid via `peer_cert_as_clientid = cn`.
@@ -98,8 +97,6 @@ for a copy-paste starting point.
 | `MQTT_CONNECT_TIMEOUT`         | `30000`         | Initial connect deadline in ms.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `MQTT_SESSION_EXPIRY_INTERVAL` | `3600`          | MQTT 5 Session Expiry Interval in seconds; with `clean:false` keeps the subscription + its queued QoS-1 messages alive across a brief disconnect (must be > 0).                                                                                                                                                                                                                                                                                                                                                                |
 | `REDIS_QUEUE_INCOMING`         | `mqtt:incoming` | Redis list key for inbound messages from broker → server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `REDIS_QUEUE_OUTGOING`         | `mqtt:outgoing` | Redis list key for outbound messages from server → broker.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `REDIS_BLPOP_TIMEOUT_SEC`      | `5`             | `BLMOVE` block timeout when polling the outgoing queue, in seconds. Name kept for backwards compatibility.                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `REDIS_REQUIRE_NOEVICTION`     | `true`          | Refuse to start when the queue Redis reports a `maxmemory-policy` other than `noeviction`. Under an eviction policy an `LPUSH` reports success, the bridge PUBACKs, the broker drops its copy, and Redis discards the entry — the message is lost on both sides with no error (measured: 400 pushes → 400 acked, 16 surviving). Fails closed: an undeterminable policy is treated as unsafe. `false` downgrades the refusal to a warning plus `csms_bridge_queue_durability_violations_total`; it does not make the loss safe. |
 
 ## Build & run

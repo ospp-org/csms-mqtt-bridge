@@ -5,7 +5,6 @@ import mqtt from 'mqtt';
 import type {
   DoneCallback,
   IClientOptions,
-  IClientPublishOptions,
   IConnackPacket,
   IDisconnectPacket,
   IPublishPacket,
@@ -15,7 +14,7 @@ import type { Logger } from 'pino';
 
 import type { Config } from './config.js';
 import { classifyDropReason, inboundPushFailuresTotal, topicDropsTotal } from './metrics.js';
-import type { IncomingEnvelope, OutgoingEnvelope, RedisBridge, ReliableOutgoing } from './redis.js';
+import type { IncomingEnvelope, RedisBridge } from './redis.js';
 import { ENVELOPE_VERSION } from './redis.js';
 import { state } from './state.js';
 
@@ -175,135 +174,8 @@ const handleInbound = async (
   );
 };
 
-const publishEnvelope = (
-  envelope: OutgoingEnvelope,
-  client: MqttClient,
-  logger: Logger,
-): Promise<void> => {
-  const opts: IClientPublishOptions = { qos: envelope.qos };
-  if (envelope.properties !== undefined) {
-    opts.properties = envelope.properties;
-  }
-  const payload = Buffer.from(envelope.payload, 'base64');
-
-  state.inflightOutbound += 1;
-  return new Promise<void>((resolve, reject) => {
-    client.publish(envelope.topic, payload, opts, (err) => {
-      state.inflightOutbound -= 1;
-      if (err) {
-        logger.error({ err, topic: envelope.topic, qos: envelope.qos }, 'publish failed');
-        reject(err);
-        return;
-      }
-      logger.debug(
-        { topic: envelope.topic, qos: envelope.qos, bytes: payload.length },
-        'published',
-      );
-      resolve();
-    });
-  });
-};
-
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-
-const startOutboundLoop = (
-  redis: RedisBridge,
-  client: MqttClient,
-  logger: Logger,
-): { stop: () => void; done: Promise<void> } => {
-  // Boxed flag so the closure check after `await` doesn't get narrowed by control-flow analysis.
-  const ctl = { stopRequested: false };
-
-  const loop = async (): Promise<void> => {
-    logger.debug('outbound loop started');
-    while (!ctl.stopRequested) {
-      let item: ReliableOutgoing | null = null;
-      try {
-        item = await redis.popOutgoingReliable();
-      } catch (popErr) {
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- ctl.stopRequested may flip during the await above; the condition is required.
-        if (ctl.stopRequested) return;
-        logger.warn({ err: popErr }, 'outbound pop/parse failed; backing off 1s');
-        await sleep(1_000);
-        continue;
-      }
-
-      if (item === null) continue;
-
-      try {
-        await publishEnvelope(item.envelope, client, logger);
-        await item.ack();
-      } catch (publishErr) {
-        // Do NOT ack — envelope stays in PROCESSING, replayed on next startup
-        // (or by mqtt.js's internal store on reconnect, since clean=false).
-        logger.warn(
-          { err: publishErr, topic: item.envelope.topic },
-          'publish failed; envelope stays in processing for retry',
-        );
-        await sleep(1_000);
-      }
-    }
-    logger.debug('outbound loop stopped');
-  };
-
-  const done = loop();
-
-  return {
-    stop: () => {
-      ctl.stopRequested = true;
-    },
-    done,
-  };
-};
-
-const replayProcessingOnce = async (
-  redis: RedisBridge,
-  client: MqttClient,
-  logger: Logger,
-): Promise<void> => {
-  let items: ReliableOutgoing[];
-  try {
-    items = await redis.replayProcessing();
-  } catch (err) {
-    logger.error({ err }, 'replayProcessing failed at startup');
-    return;
-  }
-
-  if (items.length === 0) {
-    logger.debug('processing queue empty at startup, no replay needed');
-    return;
-  }
-
-  logger.warn({ count: items.length }, 'replaying envelopes from processing queue');
-  let replayed = 0;
-  let stuck = 0;
-  for (const item of items) {
-    try {
-      await publishEnvelope(item.envelope, client, logger);
-      await item.ack();
-      replayed += 1;
-    } catch (err) {
-      logger.error(
-        { err, topic: item.envelope.topic },
-        'replay publish failed; envelope remains in processing',
-      );
-      stuck += 1;
-    }
-  }
-  logger.info({ replayed, stuck }, 'startup replay complete');
-};
-
-const registerLifecycleListeners = (
-  client: MqttClient,
-  config: Config,
-  redis: RedisBridge,
-  logger: Logger,
-): void => {
+const registerLifecycleListeners = (client: MqttClient, config: Config, logger: Logger): void => {
   const statusTopic = serverStatusTopicFor(config.MQTT_CLIENT_ID);
-  let hasReplayedOnStartup = false;
 
   client.on('connect', (packet: IConnackPacket) => {
     state.mqttConnected = true;
@@ -334,11 +206,6 @@ const registerLifecycleListeners = (
       // already exists; re-subscribing is a no-op that just re-confirms the grant.
       logger.info({ granted }, 'subscribed to station inbound topic');
     });
-
-    if (!hasReplayedOnStartup) {
-      hasReplayedOnStartup = true;
-      void replayProcessingOnce(redis, client, logger);
-    }
   });
 
   client.on('reconnect', () => {
@@ -412,14 +279,11 @@ export const startMqttClient = (
   const opts = buildClientOptions(config);
   const client = connect(config.MQTT_BROKER_URL, opts);
 
-  registerLifecycleListeners(client, config, redis, logger);
+  registerLifecycleListeners(client, config, logger);
   installManualAck(client, redis, logger);
-
-  const outbound = startOutboundLoop(redis, client, logger);
 
   const stop = async (): Promise<void> => {
     logger.info('mqtt bridge stopping');
-    outbound.stop();
 
     if (state.mqttConnected) {
       // Deliberately do NOT unsubscribe here. This bridge shuts down to RESTART
@@ -441,11 +305,6 @@ export const startMqttClient = (
         );
       });
     }
-
-    await Promise.race([
-      outbound.done,
-      sleep(Math.max(1_000, Math.floor(config.SHUTDOWN_TIMEOUT_MS / 2))),
-    ]);
 
     await new Promise<void>((resolve) => {
       client.end(false, {}, () => {

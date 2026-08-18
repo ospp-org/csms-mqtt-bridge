@@ -33,9 +33,6 @@ const cfgFor = (k: string): Config =>
   ({
     REDIS_URL: url,
     REDIS_QUEUE_INCOMING: k,
-    REDIS_QUEUE_OUTGOING: key('out'),
-    REDIS_QUEUE_PROCESSING: key('proc'),
-    REDIS_BLPOP_TIMEOUT_SEC: 1,
     REDIS_REQUIRE_NOEVICTION: true,
   }) as unknown as Config;
 

@@ -26,12 +26,7 @@ import {
   STATION_INBOUND_TOPIC,
   startMqttClient,
 } from '../mqtt.js';
-import type {
-  IncomingEnvelope,
-  OutgoingEnvelope,
-  RedisBridge,
-  ReliableOutgoing,
-} from '../redis.js';
+import type { IncomingEnvelope, RedisBridge } from '../redis.js';
 import { resetState, state } from '../state.js';
 
 // ── Test doubles ────────────────────────────────────────────────────────────
@@ -80,68 +75,19 @@ const makeFakeClient = (): FakeMqttClient => {
 
 interface FakeRedisBridge extends RedisBridge {
   pushed: IncomingEnvelope[];
-  outgoing: OutgoingEnvelope[];
-  /** Raw JSON strings of envelopes whose ack() callback was invoked. */
-  acked: string[];
 }
 
-interface MakeFakeRedisOpts {
-  outgoing?: OutgoingEnvelope[];
-  /** Items pre-loaded into the processing queue (returned by replayProcessing). */
-  processing?: OutgoingEnvelope[];
-}
-
-const makeFakeRedis = (opts: MakeFakeRedisOpts = {}): FakeRedisBridge => {
+const makeFakeRedis = (): FakeRedisBridge => {
   const pushed: IncomingEnvelope[] = [];
-  const outgoing = [...(opts.outgoing ?? [])];
-  const processing = [...(opts.processing ?? [])];
-  const acked: string[] = [];
-
-  const ackOf = (raw: string) => (): Promise<void> => {
-    acked.push(raw);
-    return Promise.resolve();
-  };
 
   return {
     pushed,
-    outgoing,
-    acked,
-
     start: vi.fn((): Promise<void> => Promise.resolve()),
-  assertQueueDurable: vi.fn((): Promise<void> => Promise.resolve()),
-
+    assertQueueDurable: vi.fn((): Promise<void> => Promise.resolve()),
     pushIncoming: vi.fn((env: IncomingEnvelope): Promise<void> => {
       pushed.push(env);
       return Promise.resolve();
     }),
-
-    popOutgoingReliable: vi.fn(
-      (): Promise<ReliableOutgoing | null> =>
-        new Promise((resolve) => {
-          if (outgoing.length > 0) {
-            const env = outgoing.shift();
-            if (env) {
-              const raw = JSON.stringify(env);
-              resolve({ envelope: env, raw, ack: ackOf(raw) });
-              return;
-            }
-          }
-          // Simulate BLMOVE timeout: yield so the loop doesn't busy-spin
-          // and stop() can flip the flag between iterations.
-          setTimeout(() => {
-            resolve(null);
-          }, 1);
-        }),
-    ),
-
-    replayProcessing: vi.fn((): Promise<ReliableOutgoing[]> => {
-      const items: ReliableOutgoing[] = processing.map((env) => {
-        const raw = JSON.stringify(env);
-        return { envelope: env, raw, ack: ackOf(raw) };
-      });
-      return Promise.resolve(items);
-    }),
-
     quit: vi.fn((): Promise<void> => Promise.resolve()),
     isReady: vi.fn(() => true),
   };
@@ -154,10 +100,7 @@ let validConfig: Config;
 const silentLogger = pino({ level: 'silent' });
 const activeBridges: MqttBridge[] = [];
 
-/**
- * Wraps startMqttClient so the bridge is auto-tracked for afterEach cleanup.
- * Without it, the outbound loop keeps running and vitest's worker hangs.
- */
+/** Wraps startMqttClient so the bridge is auto-tracked for afterEach cleanup. */
 const start = (
   cfg: Config,
   redis: ReturnType<typeof makeFakeRedis>,
@@ -169,11 +112,6 @@ const start = (
 };
 
 const flushMicrotasks = (): Promise<void> => new Promise((r) => setImmediate(r));
-
-const wait = (ms: number): Promise<void> =>
-  new Promise((r) => {
-    setTimeout(r, ms);
-  });
 
 const makePacket = (topic: string, payload: Buffer, qos: 0 | 1 | 2 = 1): IPublishPacket => ({
   cmd: 'publish',
@@ -635,194 +573,6 @@ describe('startMqttClient — inbound (handleMessage manual ack)', () => {
     );
   });
 });
-
-// ── Outbound loop — popOutgoingReliable + ack ───────────────────────────────
-
-describe('startMqttClient — outbound loop (BLMOVE + ack)', () => {
-  it('publishes envelope from outgoing and calls ack() after PUBACK', async () => {
-    const fakeClient = makeFakeClient();
-    const env: OutgoingEnvelope = {
-      version: 1,
-      topic: 'ospp/v1/stations/stn_00000001/to-station',
-      payload: Buffer.from('{"action":"BootNotificationResponse"}').toString('base64'),
-      qos: 1,
-    };
-    const fakeRedis = makeFakeRedis({ outgoing: [env] });
-
-    start(validConfig, fakeRedis, () => fakeClient as unknown as MqttClient);
-
-    // Wait for the loop to pop, publish, ack
-    for (let i = 0; i < 20 && fakeRedis.acked.length === 0; i++) {
-      await wait(5);
-    }
-
-    expect(fakeRedis.acked).toHaveLength(1);
-    expect(fakeRedis.acked[0]).toBe(JSON.stringify(env));
-
-    const publishCalls = fakeClient.publish.mock.calls.filter(
-      (c) => c[0] === 'ospp/v1/stations/stn_00000001/to-station',
-    );
-    expect(publishCalls).toHaveLength(1);
-    const payload = publishCalls[0]?.[1] as Buffer;
-    expect(payload.toString()).toBe('{"action":"BootNotificationResponse"}');
-  });
-
-  it('does NOT ack when MQTT publish fails — envelope stays for retry', async () => {
-    const fakeClient = makeFakeClient();
-    fakeClient.publish = vi.fn(
-      (
-        _topic: string,
-        _payload: Buffer | string,
-        _opts: IClientPublishOptions,
-        cb?: (err?: Error) => void,
-      ) => {
-        cb?.(new Error('broker disconnected'));
-        return fakeClient as unknown as MqttClient;
-      },
-    );
-    const env: OutgoingEnvelope = {
-      version: 1,
-      topic: 'ospp/v1/stations/stn_00000001/to-station',
-      payload: Buffer.from('x').toString('base64'),
-      qos: 1,
-    };
-    const fakeRedis = makeFakeRedis({ outgoing: [env] });
-
-    start(validConfig, fakeRedis, () => fakeClient as unknown as MqttClient);
-
-    // Wait long enough for one publish attempt + the 1s backoff to start
-    await wait(50);
-
-    expect(fakeClient.publish).toHaveBeenCalled();
-    expect(fakeRedis.acked).toHaveLength(0); // NOT acked
-  });
-
-  it('continues after a malformed envelope (popOutgoingReliable throws)', async () => {
-    const fakeClient = makeFakeClient();
-    const fakeRedis = makeFakeRedis();
-    let callCount = 0;
-    fakeRedis.popOutgoingReliable = vi.fn((): Promise<ReliableOutgoing | null> => {
-      callCount++;
-      if (callCount === 1) {
-        return Promise.reject(new Error('malformed envelope: oops'));
-      }
-      return Promise.resolve(null);
-    });
-
-    start(validConfig, fakeRedis, () => fakeClient as unknown as MqttClient);
-    await wait(50);
-
-    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn() mocks have no `this` binding
-    expect(fakeRedis.popOutgoingReliable).toHaveBeenCalled();
-    // Test passes if the bridge didn't crash (no unhandled rejection)
-  });
-});
-
-// ── Replay processing on first connect ──────────────────────────────────────
-
-describe('startMqttClient — replay processing on first connect', () => {
-  const fireConnect = (client: FakeMqttClient): void => {
-    const packet: IConnackPacket = {
-      cmd: 'connack',
-      sessionPresent: false,
-      reasonCode: 0,
-      returnCode: 0,
-    };
-    client.emit('connect', packet);
-  };
-
-  it('replays processing queue items and acks them when publish succeeds', async () => {
-    const fakeClient = makeFakeClient();
-    const stuck: OutgoingEnvelope = {
-      version: 1,
-      topic: 'ospp/v1/stations/stn_00000001/to-station',
-      payload: Buffer.from('replay-payload').toString('base64'),
-      qos: 1,
-    };
-    const fakeRedis = makeFakeRedis({ processing: [stuck] });
-
-    start(validConfig, fakeRedis, () => fakeClient as unknown as MqttClient);
-    fireConnect(fakeClient);
-
-    // Wait for async replay chain
-    for (let i = 0; i < 20 && fakeRedis.acked.length === 0; i++) {
-      await wait(5);
-    }
-
-    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn() mocks have no `this` binding
-    expect(fakeRedis.replayProcessing).toHaveBeenCalledTimes(1);
-    expect(fakeRedis.acked).toHaveLength(1);
-
-    const publishCalls = fakeClient.publish.mock.calls.filter(
-      (c) => c[0] === 'ospp/v1/stations/stn_00000001/to-station',
-    );
-    expect(publishCalls).toHaveLength(1);
-  });
-
-  it('only triggers replay once across multiple connect events', async () => {
-    const fakeClient = makeFakeClient();
-    const fakeRedis = makeFakeRedis();
-
-    start(validConfig, fakeRedis, () => fakeClient as unknown as MqttClient);
-
-    fireConnect(fakeClient);
-    await flushMicrotasks();
-    fakeClient.emit('close');
-    fireConnect(fakeClient);
-    await flushMicrotasks();
-    fakeClient.emit('close');
-    fireConnect(fakeClient);
-    await flushMicrotasks();
-
-    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn() mocks have no `this` binding
-    expect(fakeRedis.replayProcessing).toHaveBeenCalledTimes(1);
-  });
-
-  it('does nothing visible when processing queue is empty', async () => {
-    const fakeClient = makeFakeClient();
-    const fakeRedis = makeFakeRedis();
-
-    start(validConfig, fakeRedis, () => fakeClient as unknown as MqttClient);
-    fireConnect(fakeClient);
-    await flushMicrotasks();
-    await flushMicrotasks();
-
-    // eslint-disable-next-line @typescript-eslint/unbound-method -- vi.fn() mocks have no `this` binding
-    expect(fakeRedis.replayProcessing).toHaveBeenCalledTimes(1);
-    expect(fakeRedis.acked).toHaveLength(0);
-  });
-
-  it('replay does NOT ack when publish fails — item stays for next attempt', async () => {
-    const fakeClient = makeFakeClient();
-    fakeClient.publish = vi.fn(
-      (
-        _topic: string,
-        _payload: Buffer | string,
-        _opts: IClientPublishOptions,
-        cb?: (err?: Error) => void,
-      ) => {
-        cb?.(new Error('broker not ready'));
-        return fakeClient as unknown as MqttClient;
-      },
-    );
-    const stuck: OutgoingEnvelope = {
-      version: 1,
-      topic: 'ospp/v1/stations/stn_00000001/to-station',
-      payload: Buffer.from('x').toString('base64'),
-      qos: 1,
-    };
-    const fakeRedis = makeFakeRedis({ processing: [stuck] });
-
-    start(validConfig, fakeRedis, () => fakeClient as unknown as MqttClient);
-    fireConnect(fakeClient);
-    await flushMicrotasks();
-    await flushMicrotasks();
-
-    expect(fakeRedis.acked).toHaveLength(0);
-  });
-});
-
-// ── Stop semantics ──────────────────────────────────────────────────────────
 
 describe('startMqttClient — stop()', () => {
   it('does NOT unsubscribe on stop (keeps the subscription in the retained session) — F-02 fix', async () => {

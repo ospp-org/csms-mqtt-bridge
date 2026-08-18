@@ -75,8 +75,8 @@ describe('build info', () => {
   });
 });
 
-// state.ts tracked five fields and exported none of them. redisConnected,
-// lastMessageReceivedAt and inflightOutbound had NO reader anywhere — written on
+// state.ts tracked its fields and exported none of them. redisConnected and
+// lastMessageReceivedAt had NO reader anywhere — written on
 // every event and observable by nothing. So the one failure that freezes the whole
 // fleet (Redis down, ingest wedged, process alive) was invisible to Prometheus.
 // These gauges are the readers; they are collected at scrape time, not cached.
@@ -85,13 +85,11 @@ describe('bridge state gauges', () => {
     resetState();
     state.mqttConnected = true;
     state.redisConnected = false;
-    state.inflightOutbound = 3;
     state.reconnectCount = 7;
 
     const rendered = await register.metrics();
     expect(rendered).toMatch(/csms_bridge_mqtt_connected\{[^}]*\} 1/);
     expect(rendered).toMatch(/csms_bridge_redis_connected\{[^}]*\} 0/);
-    expect(rendered).toMatch(/csms_bridge_inflight_outbound\{[^}]*\} 3/);
     expect(rendered).toMatch(/csms_bridge_reconnects_total\{[^}]*\} 7/);
   });
 

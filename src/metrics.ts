@@ -128,8 +128,8 @@ export const setBuildInfo = (version: string): void => {
 /**
  * Readers for src/state.ts.
  *
- * Three of its five fields — redisConnected, lastMessageReceivedAt, inflightOutbound
- * — were written on every lifecycle event and read by NOTHING. The bridge's single
+ * Two of its four fields — redisConnected and lastMessageReceivedAt — were written
+ * on every lifecycle event and read by NOTHING. The bridge's single
  * most damaging runtime condition (Redis unreachable, so the inbound pump cannot
  * advance and ingest is frozen for the whole fleet, while the process stays alive
  * and answers its probe) produced no observable signal at all.
@@ -153,15 +153,6 @@ export const redisConnectedGauge = new Gauge({
   registers: [register],
   collect() {
     this.set(state.redisConnected ? 1 : 0);
-  },
-});
-
-export const inflightOutboundGauge = new Gauge({
-  name: 'csms_bridge_inflight_outbound',
-  help: 'Outbound publishes awaiting broker confirmation.',
-  registers: [register],
-  collect() {
-    this.set(state.inflightOutbound);
   },
 });
 

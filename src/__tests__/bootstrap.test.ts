@@ -10,8 +10,6 @@ const makeRedis = (over: Partial<RedisBridge> = {}): RedisBridge =>
     start: vi.fn((): Promise<void> => Promise.resolve()),
     assertQueueDurable: vi.fn((): Promise<void> => Promise.resolve()),
     pushIncoming: vi.fn(),
-    popOutgoingReliable: vi.fn(),
-    replayProcessing: vi.fn(),
     quit: vi.fn(),
     isReady: vi.fn(() => true),
     ...over,

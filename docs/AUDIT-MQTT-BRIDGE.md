@@ -6,6 +6,17 @@
 **Contract citit read-only din** `csms-server` (altă sesiune scrie acolo; nimic atins).
 **Nu s-a reparat nimic.** Nu s-a deployat nimic.
 
+
+> **STATUS 2026-08-18 — repairs landed.** This audit is the baseline; several of its
+> findings are now closed in code. Closed here: the writer-side eviction guard and the
+> ordered startup (§2.3, §2.2, C1, C5), version visibility (§1.5, via
+> `csms_bridge_build_info`), a real `/healthz` plus readers for every `state.ts` field
+> (§1.4, C2, C3), and the contract's impossible dedupe key (§2.5). Still open, and
+> deliberately so: everything whose fix lives in `csms-server` (the `REDIS_MQTT_HOST`
+> rendezvous, the `BRIDGE_VERSION` default, the `kill -0 1` healthcheck override, the
+> `nofile` ceiling). See §9 for what this cycle proved and §10 for findings handed to
+> that repo. Numbers in the body are as measured on 2026-08-18 **before** the repairs.
+
 ---
 
 ## 0. Rezumat — ce trebuie citit dacă nu citești tot
@@ -746,3 +757,113 @@ Ce am rulat, ca să se poată reface sau contrazice:
 Stiva locală **nu a fost atinsă**: proba a folosit un container Redis separat
 (`audit-redis-probe`, șters la final) și un port separat. `csms-server` a fost citit
 strict read-only. `dist/` e gitignorat; reconstruirea nu a murdărit arborele.
+
+---
+
+## 9. Ce a închis ciclul de reparații (2026-08-18)
+
+| # | ce | unde | probă |
+| --- | --- | --- | --- |
+| R1 | Podul refuză să pornească dacă coada poate evacua; `REDIS_REQUIRE_NOEVICTION` implicit **true**, eșuează **închis** pe politică nedeterminabilă | `src/redis.ts` `assertQueueDurable()` | test de integrare pe Redis real: acked == surviving sub `noeviction`, cu control anti-vacuitate; plus direcția opusă — aceeași cale **pierde** sub `allkeys-lru` |
+| R2 | Pornire cu adevărat ordonată: `start()` → `assertQueueDurable()` → abia apoi clientul MQTT | `src/bootstrap.ts` | 5 teste; e2e: `allkeys-lru` ⇒ **exit 1** *înainte* de a atinge brokerul |
+| R3 | O scriere refuzată e numărată, nu doar jurnalizată | `csms_bridge_inbound_push_failures_total` | plantă: ack pe push refuzat ⇒ roșu |
+| R4 | Versiunea care rulează e o serie interogabilă | `csms_bridge_build_info{version}` | plantă: reset scos ⇒ două serii ⇒ roșu |
+| R5 | `/healthz` întoarce **503** dacă lipsește brokerul **sau** coada, cu piciorul căzut numit; `isReady()` are în sfârșit apelant de producție | `src/health.ts` | e2e pe artefactul construit: `503 {"mqttConnected":false,"redisReady":true}` |
+| R6 | Toate cele 5 câmpuri din `state.ts` au cititori, eșantionate **la scrape** | `src/metrics.ts` | plantă: `collect()` scos ⇒ gauge înghețat ⇒ roșu |
+| R7 | Contractul nu mai prescrie o cheie de deduplicare imposibilă; mecanica stale corectată în contract, README, `package.json` | `docs/REDIS-QUEUE-CONTRACT.md` | test de caracterizare: același pachet livrat de două ori ⇒ două `messageId` de plic diferite |
+| R8 | Suita de integrare rulează în CI contra unui Redis real, iar primul ei caz **pică build-ul** dacă `REDIS_INTEGRATION_URL` dispare cât `CI=true` | `.github/workflows/ci.yml` | nu poate degenera într-un test care nu rulează nicăieri |
+| R9 | **Jumătatea de ieșire ȘTEARSĂ** — buclă, cozi, **tipuri**, chei de config, câmp de stare, ~1050 linii, **47 teste** (198→151) | `ADR-0001` | tipurile au căzut și ele: schema n-avea `retain`, pe care serverul îl trimite la **fiecare** publicare ⇒ n-ar fi putut purta traficul actual. Verdictul de neconformitate rămâne **DESCHIS**, scris ca atare |
+
+Porți: `lint 0 · typecheck 0 · build 0 · **151/151**` (148 + 3 de integrare).
+Suita a scăzut de la 198 fiindcă 47 de teste păzeau cod inaccesibil — **28% dintr-o
+componentă de producție**. Discriminarea dovedită prin **plantare**, nu prin credință:
+**15 defecte plantate** pe parcursul ciclului, fiecare prins și **numit** de testul care
+îl deține — inclusiv după ștergere, pe suita rămasă.
+
+---
+
+## 10. Predat lui `csms-server` — raportat, NU atins
+
+Altă sesiune scrie în acel arbore. Nimic din ce urmează nu a fost modificat de mine.
+
+### 10.1 Ordinea: îngrijorarea e reală, mecanismul numit e cel greșit
+
+Două comentarii susțin că o reîncercare inversează ordinea de pe fir:
+
+- `app/Modules/Session/Handlers/SessionEndedHandler.php:100-103`
+- `tests/Integration/Modules/Session/Handlers/StopOrderInversionTest.php:50-56`
+
+Ambele spun: *„MqttConsume:450 re-queues a soft-failed envelope with RPUSH — the TAIL
+of mqtt:incoming … puts it behind the EVENT that followed it on the wire."*
+
+**„TAIL" e corect. „Behind" e invers.** Consumatorul scoate din **RIGHT**
+(`MqttConsume.php:221-236`), iar `RPUSH` scrie tot la RIGHT — deci plicul reîncercat e
+**următorul scos**, nu ultimul. Măsurat pe Redis real:
+
+```
+listă L..R: D C B A ; se scoate A (cel mai vechi); A eșuează soft; RPUSH A
+listă L..R: D C B A ; scoaterile următoare:  A B C D      ← ordinea de pe fir PĂSTRATĂ
+```
+
+Un singur plic reîncercat cu `RPUSH` **păstrează** ordinea. Consecința reală a
+`MqttConsume.php:443-448` nu e inversarea, ci **blocarea capului de coadă**: `sleep(2|4|8)`
+sincron, apoi același plic reintră primul — până la ~14 s în care nimic altceva nu se
+consumă, apoi DLQ.
+
+**Dar inversarea EXISTĂ — într-un frate al mecanismului acuzat.** Golirile cu mai multe
+elemente inversează, fiindcă drenează cel-mai-vechi-întâi într-un capăt din care se
+consumă cel-mai-nou-întâi:
+
+```
+ordine de pe fir X1,X2,X3 claimate, apoi LMOVE pending→incoming RIGHT RIGHT
+incoming L..R: X1 X2 X3   →   consumatorul scoate:  X3  X2  X1     ← EXACT invers
+```
+
+Priveşte trei locuri:
+
+| loc | ce face | efect la ≥2 elemente |
+| --- | --- | --- |
+| `MqttConsume.php:378-390` (`replayList`) | `LMOVE pending incoming RIGHT RIGHT` în buclă | **inversare** |
+| `IngressLeaseReaper.php:87` | idem, pentru lista unui worker mort | **inversare** — iar comentariul de la `:83-84` spune explicit *„(RIGHT→RIGHT preserves FIFO)"*, ceea ce e adevărat **doar pentru un singur element** |
+| `DeadLetterQueue.php:109` | `rpush(incoming)` per mesaj la un replay de operator | **inversare** între ele, **și** sar peste tot restul cozii |
+
+Măsurat pentru ultimul: cu restanța `N1,N2` în coadă, un replay de `OLD1,OLD2,OLD3`
+se consumă `OLD3, OLD2, OLD1, N1, N2`.
+
+**Cât de des se armează:** în operare normală `pending` ține **≤1** element (claim →
+procesare → `lrem` la `:136`), deci inversarea din replay cere fie o cădere cu >1 plic
+în zbor, fie cheia `pending` moștenită, ne-sufixată, pe care `replayPending()` o
+drenează și ea (`:361`), fie un replay de operator cu mai multe mesaje. Nu e o cale
+fierbinte — dar e exact clasa pe care comentariile o caută, sub alt nume.
+
+**Nu am rulat nimic în acel arbore.** Măsurătorile de mai sus sunt pe un Redis de unică
+folosință, reproducând comenzile citate. Adjudecarea e acolo.
+
+### 10.2 Suita de fir nu dovedeşte calea de producţie
+
+`tests/MqttIntegration/MqttMoneyTestCase.php:126-160` îşi ridică propriul client mTLS
+şi se abonează direct la broker; `:183-225` cheamă `MessageDispatcher` în proces —
+o **reimplementare** a lui `MqttConsume::handleEnvelope`, după cum spune propriul
+docblock de la `:178-181`. Nici podul, nici coada Redis, nici consumatorul real nu
+sunt în cale. Suita e verde şi nu spune nimic despre calea prin care trece fiecare
+mesaj în producţie.
+
+Ce ar cere o probă reală, fără să o construiesc:
+
+1. **Un pod real în cale.** Ridică `mqtt-bridge` cu un `MQTT_CLIENT_ID` de test propriu,
+   pe o coadă Redis cu prefix de test (`REDIS_QUEUE_INCOMING=test:mqtt:incoming`) — nu
+   pe `mqtt:incoming`, altfel testul şi producţia se calcă.
+2. **Consumatorul real, nu o copie.** Rulează `mqtt:consume` cu `MQTT_WORKER_QUEUE_INCOMING`
+   pe acelaşi prefix, în loc să chemi `MessageDispatcher` direct. Asta e diferenţa
+   dintre a testa dispecerul şi a testa *drumul*.
+3. **Închide contenţia, nu o ignora.** Cât consumatorul real e sus, el concurează cu
+   harnaşamentul pe acelaşi filtru de topic — măsurat în arbore: **2/39 pică** cu el
+   pornit, **39/39** cu `docker stop csms-mqtt-consumer` (`MqttIntegrationTestCase.php:60-77`).
+   Cu cozi separate pe prefix, contenţia dispare de la sine.
+4. **Aserţiunea care contează:** publică pe `ospp/v1/stations/<id>/to-server` şi verifică
+   efectul în **bază**, nu în harnaşament. Un plic care ajunge în `test:mqtt:incoming`
+   dovedeşte doar podul; unul care devine rând în bază dovedeşte lanţul.
+5. **Controlul anti-vacuitate:** opreşte podul şi re-rulează. Dacă testul rămâne verde,
+   nu trecea prin pod — exact clasa pe care recon-ul a numit-o „direcţia periculoasă e
+   trecerea".
+
