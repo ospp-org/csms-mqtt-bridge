@@ -9,7 +9,7 @@ import pino from 'pino';
 import { bootstrap } from './bootstrap.js';
 import type { Config } from './config.js';
 import { ConfigError, loadConfig, sanitizedConfigForLog } from './config.js';
-import { register as metricsRegister } from './metrics.js';
+import { register as metricsRegister, setBuildInfo } from './metrics.js';
 import type { MqttBridge } from './mqtt.js';
 import { startMqttClient } from './mqtt.js';
 import type { RedisBridge } from './redis.js';
@@ -50,6 +50,8 @@ if (!config.MQTT_REJECT_UNAUTHORIZED) {
     'INSECURE: TLS server cert validation disabled (MQTT_REJECT_UNAUTHORIZED=false). Do not use in production.',
   );
 }
+
+setBuildInfo(pkg.version);
 
 logger.info(
   { version: pkg.version, config: sanitizedConfigForLog(config) },

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { classifyDropReason, register, topicDropsTotal } from '../metrics.js';
+import { buildInfo, classifyDropReason, register, setBuildInfo, topicDropsTotal } from '../metrics.js';
 
 describe('classifyDropReason', () => {
   it.each<[string, ReturnType<typeof classifyDropReason>]>([
@@ -41,5 +41,35 @@ describe('topicDropsTotal counter', () => {
     expect(rendered).toMatch(/csms_bridge_topic_drops_total\{[^}]*reason="other"[^}]*\} \d+/);
     // service label is set as a default label on the registry — proves the registry config
     expect(rendered).toMatch(/service="csms-mqtt-bridge"/);
+  });
+});
+
+// The bridge's running version was invisible from outside the process: it was logged
+// once at startup and never exposed. That is how a stack ran image 0.1.5 — carrying
+// AUDIT-05 F-02 on both halves — while the fix sat tagged at v0.1.7, with nothing to
+// alert on. A build_info gauge makes the deployed version a queryable series, so
+// version drift is detectable rather than archaeological.
+describe('build info', () => {
+  it('exposes the running version as a labelled series', async () => {
+    setBuildInfo('9.9.9');
+    const rendered = await register.metrics();
+    expect(rendered).toContain('# TYPE csms_bridge_build_info gauge');
+    expect(rendered).toMatch(/csms_bridge_build_info\{[^}]*version="9\.9\.9"[^}]*\} 1/);
+  });
+
+  it('keeps exactly one version series when called again (no stale version lingering)', async () => {
+    setBuildInfo('1.1.1');
+    setBuildInfo('2.2.2');
+    const rendered = await register.metrics();
+    const lines = rendered.split('\n').filter((l) => l.startsWith('csms_bridge_build_info{'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('version="2.2.2"');
+  });
+
+  it('is registered on the bridge registry, not the prom-client global default', () => {
+    // Assert presence FIRST: without this, both sides are undefined when the metric
+    // does not exist and the identity check passes vacuously.
+    expect(buildInfo).toBeDefined();
+    expect(register.getSingleMetric('csms_bridge_build_info')).toBe(buildInfo);
   });
 });

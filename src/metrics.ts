@@ -1,4 +1,4 @@
-import { Counter, Registry, collectDefaultMetrics } from 'prom-client';
+import { Counter, Gauge, Registry, collectDefaultMetrics } from 'prom-client';
 
 /**
  * Bridge metrics registry.
@@ -96,3 +96,29 @@ export const inboundPushFailuresTotal = new Counter({
   help: "Inbound messages the bridge failed to enqueue and therefore did NOT ack. Broker will redeliver; nothing is lost.",
   registers: [register],
 });
+
+/**
+ * The running build, as a queryable series. Always 1; the information is the label.
+ *
+ * The bridge logged its version once at startup and exposed it nowhere, so a stale
+ * image was invisible to everything except someone reading container logs. That is
+ * how a stack kept running 0.1.5 — which carries AUDIT-05 F-02 on both halves, a
+ * $share/ subscription and no session expiry — while the fix sat tagged at v0.1.7.
+ * With this series, `csms_bridge_build_info` can be alerted on directly.
+ */
+export const buildInfo = new Gauge({
+  name: 'csms_bridge_build_info',
+  help: 'Running csms-mqtt-bridge build. Always 1; the version label carries the information.',
+  labelNames: ['version'] as const,
+  registers: [register],
+});
+
+/**
+ * Publish the running version, replacing any previous one. Resets first so a
+ * re-publish cannot leave two version series exposed at once — a metric claiming
+ * the process is simultaneously two builds is worse than no metric.
+ */
+export const setBuildInfo = (version: string): void => {
+  buildInfo.reset();
+  buildInfo.set({ version }, 1);
+};
