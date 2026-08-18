@@ -43,4 +43,15 @@ COPY              --chown=node:node package.json LICENSE ./
 
 USER node
 
+# Ask the process whether it can do its job, not merely whether it exists.
+# /healthz answers 503 unless the bridge holds a broker connection AND can write
+# the Redis queue; busybox wget exits non-zero on a non-2xx status, so an
+# unhealthy bridge actually marks the container unhealthy.
+#
+# NOTE: a compose-level `healthcheck:` OVERRIDES this one. csms-server's
+# docker-compose.yml sets `test: ["CMD-SHELL", "kill -0 1"]`, which only asks
+# whether PID 1 exists — that override should be dropped so this applies.
+HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=3 \
+  CMD wget -q -O /dev/null "http://127.0.0.1:${METRICS_PORT:-9090}/healthz" || exit 1
+
 ENTRYPOINT ["/sbin/tini", "--", "node", "dist/index.js"]

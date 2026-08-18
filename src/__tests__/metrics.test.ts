@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { buildInfo, classifyDropReason, register, setBuildInfo, topicDropsTotal } from '../metrics.js';
+import { resetState, state } from '../state.js';
 
 describe('classifyDropReason', () => {
   it.each<[string, ReturnType<typeof classifyDropReason>]>([
@@ -71,5 +72,49 @@ describe('build info', () => {
     // does not exist and the identity check passes vacuously.
     expect(buildInfo).toBeDefined();
     expect(register.getSingleMetric('csms_bridge_build_info')).toBe(buildInfo);
+  });
+});
+
+// state.ts tracked five fields and exported none of them. redisConnected,
+// lastMessageReceivedAt and inflightOutbound had NO reader anywhere — written on
+// every event and observable by nothing. So the one failure that freezes the whole
+// fleet (Redis down, ingest wedged, process alive) was invisible to Prometheus.
+// These gauges are the readers; they are collected at scrape time, not cached.
+describe('bridge state gauges', () => {
+  it('renders connection state, in-flight count and reconnects at scrape time', async () => {
+    resetState();
+    state.mqttConnected = true;
+    state.redisConnected = false;
+    state.inflightOutbound = 3;
+    state.reconnectCount = 7;
+
+    const rendered = await register.metrics();
+    expect(rendered).toMatch(/csms_bridge_mqtt_connected\{[^}]*\} 1/);
+    expect(rendered).toMatch(/csms_bridge_redis_connected\{[^}]*\} 0/);
+    expect(rendered).toMatch(/csms_bridge_inflight_outbound\{[^}]*\} 3/);
+    expect(rendered).toMatch(/csms_bridge_reconnects_total\{[^}]*\} 7/);
+  });
+
+  it('reflects a CHANGE in state on the next scrape (not frozen at first collect)', async () => {
+    resetState();
+    state.mqttConnected = false;
+    let rendered = await register.metrics();
+    expect(rendered).toMatch(/csms_bridge_mqtt_connected\{[^}]*\} 0/);
+
+    state.mqttConnected = true;
+    rendered = await register.metrics();
+    expect(rendered).toMatch(/csms_bridge_mqtt_connected\{[^}]*\} 1/);
+  });
+
+  it('reports last-message age, and -1 when nothing has arrived', async () => {
+    resetState();
+    let rendered = await register.metrics();
+    expect(rendered).toMatch(/csms_bridge_last_message_age_seconds\{[^}]*\} -1/);
+
+    state.lastMessageReceivedAt = new Date(Date.now() - 12_000);
+    rendered = await register.metrics();
+    const match = /csms_bridge_last_message_age_seconds\{[^}]*\} (\d+)/.exec(rendered);
+    expect(match).not.toBeNull();
+    expect(Number(match?.[1])).toBeGreaterThanOrEqual(11);
   });
 });

@@ -243,6 +243,56 @@ DigiCert, etc.), `MQTT_CA_PATH` can be omitted entirely — Node's default
 trust store includes the major public roots. Set `MQTT_CA_PATH` only when
 the broker uses a non-public CA (self-signed, internal Station CA).
 
+## Observability
+
+The bridge serves two endpoints on `METRICS_PORT` (default `9090`), intra-network only —
+no host port is published.
+
+### `GET /healthz`
+
+Answers the two questions that decide whether the process is doing its job: is it
+attached to the broker, and can it write the Redis queue.
+
+- **`200`** with `{"status":"ok",...}` when both hold.
+- **`503`** otherwise, with a body naming which leg failed:
+
+  ```json
+  {
+    "status": "unhealthy",
+    "checks": { "mqttConnected": false, "redisReady": true },
+    "lastMessageAgeSeconds": null,
+    "reconnectCount": 0
+  }
+  ```
+
+`lastMessageAgeSeconds` is reported but is deliberately **not** part of the verdict —
+a quiet fleet is not a broken bridge, and a probe that failed on silence would flap on
+a deployment averaging ~100 messages a day.
+
+The image carries a `HEALTHCHECK` that calls this route. **A compose-level
+`healthcheck:` overrides it**: `csms-server`'s `docker-compose.yml` currently sets
+`test: ["CMD-SHELL", "kill -0 1"]`, which only asks whether PID 1 exists, so a fully
+wedged bridge still reports healthy. That override should be dropped.
+
+### `GET /metrics`
+
+Prometheus exposition, on a registry private to the bridge (not the prom-client
+global default), with `service="csms-mqtt-bridge"` as a default label.
+
+| Metric                                                  | Type    | Meaning                                                                                                                   |
+| ------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `csms_bridge_build_info{version}`                       | gauge   | Running build. Always 1; the label carries the information.                                                               |
+| `csms_bridge_topic_drops_total{reason}`                 | counter | Inbound messages acked and dropped because the topic failed the OSPP `to-server` pattern.                                 |
+| `csms_bridge_inbound_push_failures_total`               | counter | Inbound messages the bridge failed to enqueue and therefore did **not** ack. The healthy failure — the broker redelivers. |
+| `csms_bridge_queue_durability_violations_total{policy}` | counter | Startup checks that found `maxmemory-policy != noeviction`. Non-zero means messages can be evicted after being acked.     |
+| `csms_bridge_mqtt_connected`                            | gauge   | 1 when attached to the broker.                                                                                            |
+| `csms_bridge_redis_connected`                           | gauge   | 1 when Redis is ready. **0 means inbound is stalled** — pushes neither resolve nor reject, so nothing is acked.           |
+| `csms_bridge_inflight_outbound`                         | gauge   | Outbound publishes awaiting confirmation.                                                                                 |
+| `csms_bridge_reconnects_total`                          | gauge   | MQTT reconnect attempts since start.                                                                                      |
+| `csms_bridge_last_message_age_seconds`                  | gauge   | Seconds since the last inbound message; **-1** when none since start (not 0, which would read as "just arrived").         |
+
+Plus `collectDefaultMetrics` (event-loop lag, GC, heap).
+
 ## Repository layout
 
 ```

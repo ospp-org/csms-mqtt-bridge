@@ -9,6 +9,7 @@ import pino from 'pino';
 import { bootstrap } from './bootstrap.js';
 import type { Config } from './config.js';
 import { ConfigError, loadConfig, sanitizedConfigForLog } from './config.js';
+import { buildHealthReport, healthStatusCode } from './health.js';
 import { register as metricsRegister, setBuildInfo } from './metrics.js';
 import type { MqttBridge } from './mqtt.js';
 import { startMqttClient } from './mqtt.js';
@@ -95,8 +96,17 @@ const metricsServer: Server = createServer((req: IncomingMessage, res: ServerRes
     return;
   }
   if (url === '/healthz') {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('ok');
+    // Answers the two questions that decide whether this process is doing its job:
+    // attached to the broker, and able to write the queue. It used to return 200
+    // unconditionally, which made a totally wedged bridge indistinguishable from a
+    // working one to every layer that asked.
+    const report = buildHealthReport({ redis });
+    const code = healthStatusCode(report);
+    if (code !== 200) {
+      logger.warn({ health: report }, 'health probe reporting unhealthy');
+    }
+    res.writeHead(code, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(report));
     return;
   }
   res.writeHead(404, { 'Content-Type': 'text/plain' });

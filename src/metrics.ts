@@ -1,5 +1,7 @@
 import { Counter, Gauge, Registry, collectDefaultMetrics } from 'prom-client';
 
+import { state } from './state.js';
+
 /**
  * Bridge metrics registry.
  *
@@ -122,3 +124,67 @@ export const setBuildInfo = (version: string): void => {
   buildInfo.reset();
   buildInfo.set({ version }, 1);
 };
+
+/**
+ * Readers for src/state.ts.
+ *
+ * Three of its five fields — redisConnected, lastMessageReceivedAt, inflightOutbound
+ * — were written on every lifecycle event and read by NOTHING. The bridge's single
+ * most damaging runtime condition (Redis unreachable, so the inbound pump cannot
+ * advance and ingest is frozen for the whole fleet, while the process stays alive
+ * and answers its probe) produced no observable signal at all.
+ *
+ * Each uses a `collect()` hook so the value is sampled AT SCRAPE TIME. Setting them
+ * once at registration would freeze them at their startup values — a gauge that
+ * always reads 0 is worse than no gauge, because it looks like an answer.
+ */
+export const mqttConnectedGauge = new Gauge({
+  name: 'csms_bridge_mqtt_connected',
+  help: '1 when the bridge holds a live broker connection, 0 otherwise.',
+  registers: [register],
+  collect() {
+    this.set(state.mqttConnected ? 1 : 0);
+  },
+});
+
+export const redisConnectedGauge = new Gauge({
+  name: 'csms_bridge_redis_connected',
+  help: '1 when the Redis connection is ready, 0 otherwise. 0 means inbound is stalled: pushes neither resolve nor reject, so no message is acked and the broker retains them.',
+  registers: [register],
+  collect() {
+    this.set(state.redisConnected ? 1 : 0);
+  },
+});
+
+export const inflightOutboundGauge = new Gauge({
+  name: 'csms_bridge_inflight_outbound',
+  help: 'Outbound publishes awaiting broker confirmation.',
+  registers: [register],
+  collect() {
+    this.set(state.inflightOutbound);
+  },
+});
+
+export const reconnectsGauge = new Gauge({
+  name: 'csms_bridge_reconnects_total',
+  help: 'MQTT reconnect attempts since process start.',
+  registers: [register],
+  collect() {
+    this.set(state.reconnectCount);
+  },
+});
+
+/**
+ * Seconds since the last inbound message, or -1 when none has arrived since start.
+ * -1 rather than 0 on purpose: 0 would read as "a message just arrived", which is
+ * the opposite of the truth and the more dangerous misreading of the two.
+ */
+export const lastMessageAgeGauge = new Gauge({
+  name: 'csms_bridge_last_message_age_seconds',
+  help: 'Seconds since the last inbound message; -1 when none has been received since start.',
+  registers: [register],
+  collect() {
+    const last = state.lastMessageReceivedAt;
+    this.set(last === null ? -1 : Math.floor((Date.now() - last.getTime()) / 1000));
+  },
+});
