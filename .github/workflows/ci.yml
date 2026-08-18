@@ -21,6 +21,24 @@ jobs:
       fail-fast: false
       matrix:
         node-version: ['22.x']
+
+    # A real Redis for the eviction proof in src/__tests__/eviction.integration.test.ts.
+    # That test fills memory and compares what was ACKED against what SURVIVED — a
+    # defect no mock can reproduce, because under an eviction policy the failing
+    # write reports success. The test skips when REDIS_INTEGRATION_URL is unset, and
+    # its first case fails the build if that ever happens while CI=true, so it cannot
+    # quietly stop running.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,6 +60,8 @@ jobs:
 
       - name: Test
         run: npm run test
+        env:
+          REDIS_INTEGRATION_URL: redis://localhost:6379
 
       - name: Build
         run: npm run build

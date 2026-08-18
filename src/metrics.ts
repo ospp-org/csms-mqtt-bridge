@@ -65,3 +65,34 @@ export const classifyDropReason = (topic: string): TopicDropReason => {
   // never subscribes to as inbound).
   return 'wrong_topic_format';
 };
+
+/**
+ * Times the bridge observed a queue Redis whose `maxmemory-policy` is not
+ * `noeviction`. Incremented once per startup check that finds a violation —
+ * both when the bridge refuses to start (the default) and when
+ * REDIS_REQUIRE_NOEVICTION=false downgrades the refusal to a warning.
+ *
+ * A non-zero value means the queue can be evicted out from under an already-
+ * PUBACK'd message: acked to the broker, gone from Redis, invisible to both.
+ * This is the one bridge failure mode that loses data without any error.
+ */
+export const queueDurabilityViolationsTotal = new Counter({
+  name: 'csms_bridge_queue_durability_violations_total',
+  help: 'Startup checks that found the queue Redis maxmemory-policy != noeviction. Non-zero means inbound messages can be silently evicted after being acked to the broker.',
+  labelNames: ['policy'] as const,
+  registers: [register],
+});
+
+/**
+ * Inbound messages whose Redis push FAILED, so the bridge deliberately did not
+ * PUBACK and the broker will redeliver. This is the healthy failure: nothing is
+ * lost. It exists as a metric because previously the only signal was a log line
+ * — and the whole point of the eviction guard is that a rejected write must be
+ * loud. A sustained non-zero rate means Redis is rejecting writes (OOM under
+ * noeviction, ACL, wrong type); ingest is stalled but intact.
+ */
+export const inboundPushFailuresTotal = new Counter({
+  name: 'csms_bridge_inbound_push_failures_total',
+  help: "Inbound messages the bridge failed to enqueue and therefore did NOT ack. Broker will redeliver; nothing is lost.",
+  registers: [register],
+});

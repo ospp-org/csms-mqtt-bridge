@@ -108,6 +108,7 @@ const makeFakeRedis = (opts: MakeFakeRedisOpts = {}): FakeRedisBridge => {
     acked,
 
     start: vi.fn((): Promise<void> => Promise.resolve()),
+  assertQueueDurable: vi.fn((): Promise<void> => Promise.resolve()),
 
     pushIncoming: vi.fn((env: IncomingEnvelope): Promise<void> => {
       pushed.push(env);

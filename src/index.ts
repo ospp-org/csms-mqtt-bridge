@@ -6,9 +6,11 @@ import { fileURLToPath } from 'node:url';
 
 import pino from 'pino';
 
+import { bootstrap } from './bootstrap.js';
 import type { Config } from './config.js';
 import { ConfigError, loadConfig, sanitizedConfigForLog } from './config.js';
 import { register as metricsRegister } from './metrics.js';
+import type { MqttBridge } from './mqtt.js';
 import { startMqttClient } from './mqtt.js';
 import type { RedisBridge } from './redis.js';
 import { createRedisBridge } from './redis.js';
@@ -54,25 +56,25 @@ logger.info(
   'csms-mqtt-bridge starting',
 );
 
-// Ordered startup:
-//  1. Build the Redis bridge first (lazyConnect) — both MQTT inbound (push to
-//     incoming) and outbound (BLMOVE from outgoing) need Redis to be ready.
-//  2. redis.start() opens the connection and resolves on 'ready'. If Redis is
-//     unreachable, this rejects and we exit fatal.
-//  3. Once Redis is up, start the MQTT client. Its 'connect' handler triggers
-//     the processing-queue replay, which Redis MUST be ready to serve.
+// Ordered startup — see bootstrap.ts for why the order is load-bearing. The
+// MQTT client is constructed ONLY after Redis is ready AND proven non-evicting,
+// because the client acks to the broker the moment a push resolves.
 const redis: RedisBridge = createRedisBridge(config, { logger });
+
+let mqtt: MqttBridge | null = null;
 
 void (async (): Promise<void> => {
   try {
-    await redis.start();
+    mqtt = await bootstrap({
+      redis,
+      startMqtt: () => startMqttClient(config, redis, logger),
+      logger,
+    });
   } catch (err) {
-    logger.fatal({ err }, 'redis failed to start, exiting');
+    logger.fatal({ err }, 'bridge failed to start, exiting');
     process.exit(1);
   }
 })();
-
-const mqtt = startMqttClient(config, redis, logger);
 
 const metricsServer: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
   const url = req.url ?? '/';
@@ -128,7 +130,9 @@ const shutdown = (signal: NodeJS.Signals): void => {
 
   void (async (): Promise<void> => {
     try {
-      await mqtt.stop();
+      // null when startup never completed (Redis down, or the durability guard
+      // refused) — there is no broker connection to drain in that case.
+      await mqtt?.stop();
       await redis.quit();
       await new Promise<void>((resolve) => {
         metricsServer.close(() => {

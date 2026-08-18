@@ -2,6 +2,7 @@ import { Redis } from 'ioredis';
 import type { Logger } from 'pino';
 
 import type { Config } from './config.js';
+import { queueDurabilityViolationsTotal } from './metrics.js';
 import { state } from './state.js';
 
 type Qos = 0 | 1 | 2;
@@ -52,6 +53,19 @@ export interface RedisBridge {
    * second call after ready resolves immediately.
    */
   start(): Promise<void>;
+  /**
+   * Assert the queue Redis cannot evict the queue. Reads `maxmemory-policy` from
+   * the MAIN client — the one `pushIncoming` writes through — and rejects unless
+   * it is `noeviction`.
+   *
+   * Fails CLOSED: if the policy cannot be determined (CONFIG GET rejected by ACL,
+   * renamed, or answering an unexpected shape) that is treated as unsafe, never
+   * as safe. An undeterminable policy is exactly as dangerous as a known-bad one.
+   *
+   * With REDIS_REQUIRE_NOEVICTION=false this warns and counts instead of
+   * rejecting. It never makes the underlying loss safe.
+   */
+  assertQueueDurable(): Promise<void>;
   pushIncoming(envelope: IncomingEnvelope): Promise<void>;
   /**
    * Atomically move one envelope from the OUTGOING list to the PROCESSING
@@ -145,6 +159,27 @@ const wireLifecycleEvents = (redis: Redis, logger: Logger, label: string): void 
   });
 };
 
+/**
+ * ioredis answers CONFIG GET with a FLAT array — `['maxmemory-policy', 'noeviction']`
+ * — not the keyed map phpredis hands csms-server. Reading it as a map (as the
+ * server-side guard does, correctly for its own client) would yield undefined here
+ * on every call, so the guard would fail closed against every Redis including a
+ * correct one: a gate right in mechanism and blind in vocabulary. Verified against
+ * a live redis:7-alpine before this was written.
+ *
+ * Returns null when the reply is not the expected shape, which callers treat as
+ * "undeterminable" — never as "fine".
+ */
+const readPolicyReply = (reply: unknown): string | null => {
+  if (!Array.isArray(reply)) return null;
+  const idx = reply.indexOf('maxmemory-policy');
+  if (idx === -1) return null;
+  const value: unknown = reply[idx + 1];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+};
+
+const UNDETERMINABLE = 'undeterminable';
+
 interface CreateRedisBridgeOpts {
   /** Inject a pre-built ioredis client (tests). When provided, no listeners are wired. */
   client?: Redis;
@@ -200,6 +235,41 @@ export const createRedisBridge = (
         connects.push(redisBlocking.connect());
       }
       await Promise.all(connects);
+    },
+
+    async assertQueueDurable() {
+      let policy: string | null = null;
+      try {
+        policy = readPolicyReply(await redis.config('GET', 'maxmemory-policy'));
+      } catch {
+        policy = null;
+      }
+
+      if (policy === 'noeviction') return;
+
+      queueDurabilityViolationsTotal.inc({ policy: policy ?? UNDETERMINABLE });
+
+      const detail =
+        policy === null
+          ? `the queue Redis maxmemory-policy could not be determined (CONFIG GET unavailable or unexpected reply)`
+          : `the queue Redis reports maxmemory-policy='${policy}', not 'noeviction'`;
+
+      const message =
+        `csms-mqtt-bridge — ${detail}. Under memory pressure the queue can be evicted ` +
+        `AFTER the bridge has already PUBACK'd the message to the broker, so it is lost ` +
+        `on both sides with no error and no redelivery. Point REDIS_URL at the dedicated ` +
+        `noeviction instance (docker-compose redis-queue) — the same instance the ` +
+        `csms-server worker's REDIS_MQTT_* must resolve to. Set ` +
+        `REDIS_REQUIRE_NOEVICTION=false to downgrade this to a warning.`;
+
+      if (config.REDIS_REQUIRE_NOEVICTION) {
+        throw new Error(message);
+      }
+
+      logger?.warn(
+        { policy: policy ?? UNDETERMINABLE, redisRequireNoeviction: false },
+        `[QUEUE_DURABILITY] ${message}`,
+      );
     },
 
     async pushIncoming(envelope) {
@@ -273,4 +343,4 @@ export const createRedisBridge = (
 };
 
 // Exported for unit tests.
-export const __test__ = { parseOutgoingEnvelope, retryStrategy };
+export const __test__ = { parseOutgoingEnvelope, retryStrategy, readPolicyReply };

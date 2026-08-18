@@ -100,6 +100,17 @@ const envSchema = z.object({
   // (Phase F.7) will need a per-clientId suffix to avoid cross-instance theft.
   REDIS_QUEUE_PROCESSING: z.string().min(1).default('mqtt:processing'),
   REDIS_BLPOP_TIMEOUT_SEC: positiveInt.default(5),
+  // Refuse to start when the queue Redis can EVICT the queue out from under us.
+  // Default true, and deliberately so: under an eviction policy an LPUSH reports
+  // success, the bridge PUBACKs, the broker drops its copy, and Redis silently
+  // discards the entry — the message is lost on both sides with no error, no log
+  // and no metric. Measured against a real Redis: `allkeys-lru` 400 pushes ->
+  // 400 resolved / 0 rejected / 16 surviving; `noeviction` -> resolved ==
+  // surviving exactly, the overflow rejected with OOM so the ack is withheld.
+  // Set false ONLY for a local stack you accept losing messages on; it downgrades
+  // the refusal to a warning and a counter, it does not make the loss safe.
+  // Mirrors csms-server MqttConsume::assertQueueRedisDurable() on the reader side.
+  REDIS_REQUIRE_NOEVICTION: booleanFromEnv.default(true),
 });
 
 export type Config = z.infer<typeof envSchema>;
@@ -145,6 +156,7 @@ export const sanitizedConfigForLog = (
   redisQueueIncoming: config.REDIS_QUEUE_INCOMING,
   redisQueueOutgoing: config.REDIS_QUEUE_OUTGOING,
   redisQueueProcessing: config.REDIS_QUEUE_PROCESSING,
+  redisRequireNoeviction: config.REDIS_REQUIRE_NOEVICTION,
   metricsPort: config.METRICS_PORT,
   logLevel: config.LOG_LEVEL,
   shutdownTimeoutMs: config.SHUTDOWN_TIMEOUT_MS,

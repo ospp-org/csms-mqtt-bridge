@@ -3,10 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { Redis } from 'ioredis';
+import type { Logger } from 'pino';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Config } from '../config.js';
 import { loadConfig } from '../config.js';
+import { queueDurabilityViolationsTotal, register as metricsRegister } from '../metrics.js';
 import { __test__, createRedisBridge, ENVELOPE_VERSION } from '../redis.js';
 
 const { parseOutgoingEnvelope, retryStrategy } = __test__;
@@ -149,6 +151,7 @@ interface FakeRedis {
   lpush: ReturnType<typeof vi.fn>;
   lrem: ReturnType<typeof vi.fn>;
   lrange: ReturnType<typeof vi.fn>;
+  config: ReturnType<typeof vi.fn>;
   quit: ReturnType<typeof vi.fn>;
   on: ReturnType<typeof vi.fn>;
   once: ReturnType<typeof vi.fn>;
@@ -173,6 +176,10 @@ const makeFakeRedisClient = (): FakeRedis => ({
   ),
   lrange: vi.fn(
     (_key: string, _start: number, _stop: number): Promise<string[]> => Promise.resolve([]),
+  ),
+  config: vi.fn(
+    (_op: string, _param: string): Promise<unknown> =>
+      Promise.resolve(['maxmemory-policy', 'noeviction']),
   ),
   quit: vi.fn((): Promise<'OK'> => Promise.resolve('OK')),
   on: vi.fn(),
@@ -606,5 +613,86 @@ describe('createRedisBridge — separate blocking client', () => {
     // quit() should only quit once, since both refs point to the same fake.
     await bridge.quit();
     expect(fake.quit).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── assertQueueDurable — the writer-side eviction guard ────────────────────
+//
+// The reader (csms-server MqttConsume::assertQueueRedisDurable) already refuses to
+// run against an evicting queue Redis. The WRITER had no equivalent, and the writer
+// is the side that loses: under `allkeys-lru` an LPUSH reports success, the bridge
+// PUBACKs, the broker drops its copy, and Redis evicts the entry. Measured against a
+// real Redis: 400 pushes -> 400 resolved, 0 rejected, 16 surviving. Under
+// `noeviction` the same run rejects with OOM, the bridge withholds the ack, and
+// resolved == surviving exactly.
+
+const durableConfig = (over: Partial<Config> = {}): Config => ({ ...validConfig, ...over });
+
+describe('assertQueueDurable', () => {
+  it('resolves when the queue Redis reports noeviction', async () => {
+    const fake = makeFakeRedisClient();
+    fake.config = vi.fn(() => Promise.resolve(['maxmemory-policy', 'noeviction']));
+    const bridge = createRedisBridge(durableConfig(), { client: fake as unknown as Redis });
+    await expect(bridge.assertQueueDurable()).resolves.toBeUndefined();
+    expect(fake.config).toHaveBeenCalledWith('GET', 'maxmemory-policy');
+  });
+
+  it('REJECTS when the queue Redis can evict (allkeys-lru)', async () => {
+    const fake = makeFakeRedisClient();
+    fake.config = vi.fn(() => Promise.resolve(['maxmemory-policy', 'allkeys-lru']));
+    const bridge = createRedisBridge(durableConfig(), { client: fake as unknown as Redis });
+    await expect(bridge.assertQueueDurable()).rejects.toThrow(/allkeys-lru/);
+  });
+
+  it('names the offending policy and the remedy in the error', async () => {
+    const fake = makeFakeRedisClient();
+    fake.config = vi.fn(() => Promise.resolve(['maxmemory-policy', 'volatile-ttl']));
+    const bridge = createRedisBridge(durableConfig(), { client: fake as unknown as Redis });
+    await expect(bridge.assertQueueDurable()).rejects.toThrow(/volatile-ttl[\s\S]*noeviction/);
+  });
+
+  // Fail CLOSED: an undeterminable policy is treated as unsafe, never as safe.
+  it('REJECTS when CONFIG GET returns an unexpected shape', async () => {
+    const fake = makeFakeRedisClient();
+    fake.config = vi.fn(() => Promise.resolve([]));
+    const bridge = createRedisBridge(durableConfig(), { client: fake as unknown as Redis });
+    await expect(bridge.assertQueueDurable()).rejects.toThrow(/could not be determined/);
+  });
+
+  it('REJECTS when CONFIG GET itself fails (ACL / renamed command)', async () => {
+    const fake = makeFakeRedisClient();
+    fake.config = vi.fn(() => Promise.reject(new Error('ERR unknown command')));
+    const bridge = createRedisBridge(durableConfig(), { client: fake as unknown as Redis });
+    await expect(bridge.assertQueueDurable()).rejects.toThrow(/could not be determined/);
+  });
+
+  it('downgrades to a warning when REDIS_REQUIRE_NOEVICTION=false, and still counts it', async () => {
+    queueDurabilityViolationsTotal.reset();
+    const fake = makeFakeRedisClient();
+    fake.config = vi.fn(() => Promise.resolve(['maxmemory-policy', 'allkeys-lru']));
+    const warn = vi.fn();
+    const logger = { warn, error: vi.fn(), info: vi.fn(), debug: vi.fn() } as unknown as Logger;
+    const bridge = createRedisBridge(durableConfig({ REDIS_REQUIRE_NOEVICTION: false }), {
+      client: fake as unknown as Redis,
+      logger,
+    });
+    await expect(bridge.assertQueueDurable()).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledOnce();
+    const body = await metricsRegister.metrics();
+    expect(body).toMatch(/csms_bridge_queue_durability_violations_total\{[^}]*policy="allkeys-lru"[^}]*\} 1/);
+  });
+
+  it('queries the MAIN client, which is the one pushIncoming writes through', async () => {
+    const main = makeFakeRedisClient();
+    const blocking = makeFakeRedisClient();
+    main.config = vi.fn(() => Promise.resolve(['maxmemory-policy', 'noeviction']));
+    blocking.config = vi.fn(() => Promise.resolve(['maxmemory-policy', 'allkeys-lru']));
+    const bridge = createRedisBridge(durableConfig(), {
+      client: main as unknown as Redis,
+      blockingClient: blocking as unknown as Redis,
+    });
+    await expect(bridge.assertQueueDurable()).resolves.toBeUndefined();
+    expect(main.config).toHaveBeenCalledOnce();
+    expect(blocking.config).not.toHaveBeenCalled();
   });
 });

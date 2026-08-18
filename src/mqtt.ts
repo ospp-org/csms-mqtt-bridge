@@ -14,7 +14,7 @@ import type {
 import type { Logger } from 'pino';
 
 import type { Config } from './config.js';
-import { classifyDropReason, topicDropsTotal } from './metrics.js';
+import { classifyDropReason, inboundPushFailuresTotal, topicDropsTotal } from './metrics.js';
 import type { IncomingEnvelope, OutgoingEnvelope, RedisBridge, ReliableOutgoing } from './redis.js';
 import { ENVELOPE_VERSION } from './redis.js';
 import { state } from './state.js';
@@ -383,6 +383,12 @@ const installManualAck = (client: MqttClient, redis: RedisBridge, logger: Logger
       },
       (err: unknown) => {
         const error = err instanceof Error ? err : new Error(String(err));
+        // Counted, not just logged: a refused write is the HEALTHY failure (the
+        // broker keeps the message), but it is indistinguishable from silence
+        // unless something outside the process can see it. Under `noeviction`
+        // this is what memory pressure looks like; under an eviction policy the
+        // write would have succeeded and the message would be gone instead.
+        inboundPushFailuresTotal.inc();
         logger.error(
           { err: error, topic: packet.topic },
           'inbound push failed; NOT acking — broker will redeliver',
