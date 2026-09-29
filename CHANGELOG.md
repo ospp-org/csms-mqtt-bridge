@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- `src/index.ts` no longer says that stopping MQTT drains outbound - the outbound path went
+  in 0.2.0 - nor that the MQTT client is constructed only over a queue Redis proven
+  non-evicting. With `REDIS_REQUIRE_NOEVICTION=false` it is constructed after a warning
+  when the policy is not `noeviction` or cannot be read.
+
 ### Internal
 
 - The CI workflow's job times out after **20 minutes** instead of GitHub's default 360, as

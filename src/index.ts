@@ -61,8 +61,11 @@ logger.info(
 );
 
 // Ordered startup — see bootstrap.ts for why the order is load-bearing. The
-// MQTT client is constructed ONLY after Redis is ready AND proven non-evicting,
-// because the client acks to the broker the moment a push resolves.
+// MQTT client is constructed ONLY after Redis is ready AND its maxmemory-policy
+// has been read, because the client acks to the broker the moment a push
+// resolves. A policy other than noeviction, or one that cannot be read, ends
+// startup before the client exists - unless REDIS_REQUIRE_NOEVICTION=false,
+// which logs a warning and constructs it anyway, over a queue that may evict.
 const redis: RedisBridge = createRedisBridge(config, { logger });
 
 let mqtt: MqttBridge | null = null;
@@ -140,10 +143,11 @@ metricsServer.listen(config.METRICS_PORT, () => {
   );
 });
 
-// Reverse of startup: stop MQTT (drains outbound, publishes offline, ends),
-// then quit Redis. Bounded by SHUTDOWN_TIMEOUT_MS so a wedged peer can't
-// keep the process alive past its grace period - which is also what bounds a
-// shutdown the watchdog starts while a Redis command is stuck.
+// Reverse of startup: stop MQTT (publishes the retained offline status when
+// connected, then ends the client without unsubscribing), then quit Redis.
+// Bounded by SHUTDOWN_TIMEOUT_MS so a wedged peer can't keep the process alive
+// past its grace period - which is also what bounds a shutdown the watchdog
+// starts while a Redis command is stuck.
 //
 // exitCode 1 for a bridge ending itself (the watchdog, a refused subscription): the
 // restart is the point, and a non-zero exit reads as the failure it is.
