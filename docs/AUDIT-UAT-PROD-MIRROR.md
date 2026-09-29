@@ -25,7 +25,7 @@
 
 UAT was originally configured as a dev-friendly environment to unblock frontend/API iteration. That decision left UAT functionally usable but **not** representative of how prod will behave. The risk: prod has never been deployed; its config files exist but have never run end-to-end.
 
-This audit (v2) identifies the gaps between UAT-actual and UAT-as-prod-mirror, and includes the major architectural addition discovered during PASUL A verification: **csms-server must be an MQTT client subscriber** (per OSPP spec `implementors-guide.md:48,227,626,1150`), not just an HTTP webhook receiver. The current implementation uses webhook + EMQX REST API publish — a sandbox shortcut, not OSPP-compliant. Phase 0 introduces a proper MQTT subscriber as a Node.js sidecar.
+This audit (v2) identifies the gaps between UAT-actual and UAT-as-prod-mirror, and includes the major architectural addition discovered during PASUL A verification: **csms-server must be an MQTT client subscriber** (per OSPP spec `implementors-guide.md`, sections "The Three Actors", "2.4 MQTT Connection Details", "3.2 MQTT Setup" and the "Server Core" list of "7. Conformance Checklist"), not just an HTTP webhook receiver. The current implementation uses webhook + EMQX REST API publish — a sandbox shortcut, not OSPP-compliant. Phase 0 introduces a proper MQTT subscriber as a Node.js sidecar.
 
 User principle (do not violate): **"There is no 'correct for now' solution. Either a solution is correct or it isn't."**
 
@@ -37,7 +37,7 @@ The following are settled. Implementer (Claude CLI) may flag if any decision app
 
 1. **Authentication architecture**: pure mTLS, no MqttAuthController/MqttAclController. CN extracted from cert via `peer_cert_as_clientid = cn` is the MQTT clientid. File ACL with `${clientid}` substitution provides per-station topic isolation. Final.
 
-2. **MQTT transport for csms-server**: server is a real MQTT client. Implementation is a **Node.js sidecar service** (`csms-mqtt-bridge`) using `mqtt.js`. It subscribes to `$share/ospp-servers/ospp/v1/stations/+/to-server` (shared subscription per OSPP spec implementors-guide.md:626) and publishes to `ospp/v1/stations/{id}/to-station`. Communicates with PHP application via Redis (push-pull queues). Final. Webhook + EMQX REST API publish is **legacy**, will be deprecated and removed after sidecar is stable.
+2. **MQTT transport for csms-server**: server is a real MQTT client. Implementation is a **Node.js sidecar service** (`csms-mqtt-bridge`) using `mqtt.js`. It subscribes to `$share/ospp-servers/ospp/v1/stations/+/to-server` (shared subscription per OSPP spec implementors-guide.md, section "3.2 MQTT Setup") and publishes to `ospp/v1/stations/{id}/to-station`. Communicates with PHP application via Redis (push-pull queues). Final. Webhook + EMQX REST API publish is **legacy**, will be deprecated and removed after sidecar is stable.
 
 3. **Server cert CN convention**: `csms-uat-server-N` (UAT) and `csms-prod-server-N` (prod), where N is instance number for horizontal scaling. ACL pattern `csms-server-*` matches both. Server cert signed by Station CA (treat server as a privileged "station" identity at PKI level — same trust chain).
 
@@ -75,22 +75,22 @@ The following are settled. Implementer (Claude CLI) may flag if any decision app
 - EMQX webhook pipeline active on UAT: connector `csms_webhook` (status `connected`), action `csms_mqtt_webhook`, rule `csms_mqtt_forward`. `init-webhook.sh` idempotent.
 - Storage keys present: jwt, root-ca-cert.pem (P-384, 20-year), root-ca-key.enc.json, station-ca-cert.pem (P-256, 5-year), station-ca-key.enc.json. AES-256-GCM master key in `.env`.
 - One station (`stn_00000001`) provisioned end-to-end. Cert valid, chain validates, DB row in `certificates` confirms.
-- **Health endpoints implemented** (CLI verified): `HealthCheckController` does `/health`, `/health/ready`, `/health/live` complete (DB + Redis + MQTT checks). Loaded via `bootstrap/app.php:21`.
-- **Metrics endpoint implemented** (CLI verified): `MetricsController` + `App\Shared\Observability\PrometheusMetrics`, route in `routes/health.php:23`. Promphp wrapped.
+- **Health endpoints implemented** (CLI verified): `HealthCheckController` does `/health`, `/health/ready`, `/health/live` complete (DB + Redis + MQTT checks). Loaded via the `then:` closure of `withRouting` in `bootstrap/app.php`.
+- **Metrics endpoint implemented** (CLI verified): `MetricsController` + `App\Shared\Observability\PrometheusMetrics`, route `GET /metrics` in `routes/health.php`. Promphp wrapped.
 
 ### 1.2 What is broken or missing
 
 | # | Issue | Severity | Phase | Location |
 |---|---|---|---|---|
-| 1 | csms-server is NOT an MQTT client subscriber (uses webhook + EMQX REST API publish; OSPP spec requires MQTT subscriber per implementors-guide.md:48,626) | CRITICAL | 0 | New service required |
-| 2 | EMQX `verify = verify_none` on UAT (env override hides config) | CRITICAL | A | `docker-compose.yml` line 109 (BASE compose) |
-| 3 | EMQX `fail_if_no_peer_cert = false` on UAT (env override) | CRITICAL | A | `docker-compose.yml` line 110 (BASE) |
-| 4 | EMQX `cacertfile` points to wrong CA (currently dev/Let's Encrypt; should be OneStopPay Root CA — client cert trust anchor) | CRITICAL | A | `docker/emqx/emqx.conf` line 41 + cert mount |
+| 1 | csms-server is NOT an MQTT client subscriber (uses webhook + EMQX REST API publish; OSPP spec requires MQTT subscriber per implementors-guide.md, sections "The Three Actors" and "3.2 MQTT Setup") | CRITICAL | 0 | New service required |
+| 2 | EMQX `verify = verify_none` on UAT (env override hides config) | CRITICAL | A | `docker-compose.yml` (BASE compose), service `emqx`, the `EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__VERIFY` environment entry |
+| 3 | EMQX `fail_if_no_peer_cert = false` on UAT (env override) | CRITICAL | A | `docker-compose.yml` (BASE), service `emqx`, the `EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__FAIL_IF_NO_PEER_CERT` environment entry |
+| 4 | EMQX `cacertfile` points to wrong CA (currently dev/Let's Encrypt; should be OneStopPay Root CA — client cert trust anchor) | CRITICAL | A | `docker/emqx/emqx.conf`, the `cacertfile` key + cert mount |
 | 5 | EMQX missing `peer_cert_as_clientid = cn` directive | CRITICAL | A | `emqx.conf` and `.production` both |
 | 6 | EMQX file ACL has `{allow, all}` catch-all + `no_match = allow`; production variant correct but never mounted | HIGH | A | `docker/emqx/acl.conf` + `emqx.conf` |
 | 7 | `EMQX_WEBHOOK_SECRET` is empty string — webhook unauthenticated (transitional issue, removed when webhook is deprecated in Phase 0) | HIGH | A | compose env |
 | 8 | `.env` is bake-included in Docker image | CRITICAL | B | `.dockerignore` |
-| 9 | `routes/metrics.php` orphan (closure not loaded by bootstrap; real metrics live in `routes/health.php:23`) | LOW | C | route file cleanup |
+| 9 | `routes/metrics.php` orphan (closure not loaded by bootstrap; real metrics live in the `/metrics` route of `routes/health.php`) | LOW | C | route file cleanup |
 | 10 | Loki up but Laravel logs not shipped | MEDIUM | C | logging driver |
 | 11 | No backup schedule | MEDIUM | D | host config |
 | 12 | docker-compose.prod.yml does NOT mount `emqx.conf.production` or `acl.conf.production` | HIGH | A | `docker-compose.prod.yml` |
@@ -99,11 +99,11 @@ The following are settled. Implementer (Claude CLI) may flag if any decision app
 | 15 | Existing 30 stations seeded with `ecdsa_public_key = NULL` and no certs | MEDIUM (data, not config) | E | seeded data |
 | 16 | No admin endpoint for provisioning-tokens issuance | HIGH | E | new endpoint required |
 | 17 | docker-compose.prod.yml lacks observability stack | HIGH | F | investigate |
-| 18 | csms-server stationId validation too loose: `RegisterStationRequest` only enforces `string\|max:64`, `StationId` value object only checks `str_starts_with('stn_')`. Spec demands `^stn_[a-f0-9]{8,}$` (per spec/spec/01-architecture.md:127, glossary.md:331-332). csms-server accepts non-spec-compliant ids (e.g. `stn_xyz`). Discovered during csms-mqtt-bridge Phase 0.4 review when bridge regex was tightened. | HIGH | E | csms-server `app/Http/Requests/Admin/RegisterStationRequest.php` + `app/Shared/ValueObjects/StationId.php` |
+| 18 | csms-server stationId validation too loose: `RegisterStationRequest` only enforces `string\|max:64`, `StationId` value object only checks `str_starts_with('stn_')`. Spec demands `^stn_[a-f0-9]{8,}$` (per spec `01-architecture.md`, section "3.1 Identifier Format", and `glossary.md`, entry "Station"). csms-server accepts non-spec-compliant ids (e.g. `stn_xyz`). Discovered during csms-mqtt-bridge Phase 0.4 review when bridge regex was tightened. | HIGH | E | csms-server `app/Http/Requests/Admin/RegisterStationRequest.php` + `app/Shared/ValueObjects/StationId.php` |
 
 ### 1.3 Architectural decision: pure mTLS, sidecar MQTT subscriber
 
-The current csms-server uses `EmqxApiPublisher` (POST `/api/v5/publish` to EMQX REST API) for outbound and HTTP webhook for inbound. This is **sandbox pattern**, not OSPP-compliant. Spec at `implementors-guide.md:48`: *"Server (CSMS) — communicates with stations over MQTT."* And `:626`: *"Subscribe to all station messages using shared subscriptions."*
+The current csms-server uses `EmqxApiPublisher` (POST `/api/v5/publish` to EMQX REST API) for outbound and HTTP webhook for inbound. This is **sandbox pattern**, not OSPP-compliant. Spec `implementors-guide.md`, section "The Three Actors": *"Server (CSMS) — communicates with stations over MQTT."* And its section "3.2 MQTT Setup": *"Subscribe to all station messages using shared subscriptions."*
 
 **Decision**: implement a Node.js sidecar (`csms-mqtt-bridge`) that:
 - Connects to EMQX with mTLS using a server cert (CN `csms-uat-server-1`).
@@ -275,7 +275,7 @@ A.3. Generate strong `EMQX_WEBHOOK_SECRET` (32 bytes hex). Add to `/opt/osp/csms
    *Note: webhook is being deprecated in Phase 0.10. This step is transitional.*
 
 A.4. **Remove env overrides hiding mTLS in BASE compose** (CLI's BLOCKER 3):
-- `docker-compose.yml` (BASE): DELETE lines 109 and 110 (verify_none + fail_if_no_peer_cert=false).
+- `docker-compose.yml` (BASE): DELETE the `EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__VERIFY` and `EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__FAIL_IF_NO_PEER_CERT` environment entries of service `emqx` (verify_none + fail_if_no_peer_cert=false).
 - Move these to `docker-compose.dev.yml` (local dev override).
 - UAT and prod compose inherit secure default.
 
@@ -428,7 +428,7 @@ C.2. **Verify metrics endpoint** (already implemented per CLI):
 - Prometheus targets show `csms-app` health = `up`.
 - Currently failing; root-cause and fix.
 
-C.3. **Clean orphan** `routes/metrics.php` (closure not loaded by bootstrap; real metrics in `routes/health.php:23`).
+C.3. **Clean orphan** `routes/metrics.php` (closure not loaded by bootstrap; real metrics in the `/metrics` route of `routes/health.php`).
 
 C.4. Add custom OSPP metrics to `PrometheusMetrics`:
 - `ospp_messages_received_total{station_id}` counter

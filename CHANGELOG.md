@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/ADR-0001-outbound-path-removed.md`: its 12 line citations are names of what the lines
   held on 2026-08-18, the ADR's date - csms-server at `e12b10e7`, the spec at v0.23.0. The
   ADR's claims are unchanged.
+- `docs/AUDIT-UAT-PROD-MIRROR.md`, the frozen v2 audit: its 15 line citations are names of what
+  the lines held on 2026-04-27 - csms-server at `b261c789`, the spec at v0.2.4. The audit's
+  claims are unchanged.
 
 ### Internal
 
