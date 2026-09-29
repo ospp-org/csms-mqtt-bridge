@@ -21,13 +21,18 @@ Established, each verified directly rather than inherited:
   three months *after* the outbound half was built (`fa244a5`, `cde03d7` 2026-05-11;
   `5973f85` 2026-07-23).
 - **"Phase 0.9" was named once and never revisited.**
-  `docs/PHASE-0.8-IMPLEMENTATION.md:48,171` queues the migration; `git log` on that file
+  `docs/PHASE-0.8-IMPLEMENTATION.md` ("1. Architecture at a glance", bullet "Outbound responses still
+  use the EMQX REST API"; "6. Known limitations carried forward", bullet "Phase 0.9 — outbound through
+  `mqtt:outgoing`") queues the migration; `git log` on that file
   shows **one commit, `7173e4b`, 2026-04-29**. Its sibling Phase 0.10 (webhook retirement)
   *was* executed, in `2594e88` 2026-05-16 — the roadmap was live and 0.9 was passed over.
 - **Later documents treat REST as settled architecture**, with no migration caveat:
-  `docs/remediation/UAT-ACTIVATION-20260705.md:41` ("outbound was never at risk"),
-  `docs/audits/AUDIT-05-concurrency-distributed-state.md:838` (a formal concurrency audit
-  consciously excluding the queue as inactive machinery), `docs/PROJECT-STATUS.md:28`.
+  `docs/remediation/UAT-ACTIVATION-20260705.md`, "3.2 Lockstep (both halves)" of "STEP 3 — B6 dedicated
+  `redis-queue` (pipe-M3) — ACTIVATED + PROVEN", bullet "Architecture note" ("outbound was never at risk"),
+  `docs/audits/AUDIT-05-concurrency-distributed-state.md`, "What I checked and found clean", bullet "The active
+  outbound server path is EMQX REST, not the bridge's Redis outgoing queue" (a formal concurrency audit
+  consciously excluding the queue as inactive machinery), `docs/PROJECT-STATUS.md`, "MQTT Protocol", bullet
+  "Transport: EmqxApiPublisher".
 - Compose sets no `REDIS_QUEUE_OUTGOING` or `REDIS_QUEUE_PROCESSING` in any environment.
   The loop ran entirely on defaults no deployer ever configured.
 
@@ -72,9 +77,9 @@ starting point survives a rewrite it should not have survived.
 **The error semantics invert, so the call sites cannot be ported mechanically.**
 `EmqxApiPublisher::publish()` throws `PublishFailedException` **synchronously** when the
 broker or API is unreachable, and callers depend on that:
-`DashboardDeviceController.php:325` surfaces it to the operator,
-`StopAllStationSessionsAction.php:72` handles it in the stop-all leg,
-`CheckKeyExpiryCommand.php:484` reasons about it. An `RPUSH` succeeds whether or not the
+`DashboardDeviceController::failureReason()` surfaces it to the operator,
+`StopAllStationSessionsAction::execute()` handles it in the stop-all leg,
+`CheckKeyExpiryCommand::triggerRenewal()` reasons about it. An `RPUSH` succeeds whether or not the
 broker is reachable. Moving outbound to a queue silently deletes the failure signal from
 all three unless an async delivery-result channel is built first — and none exists.
 
@@ -99,7 +104,8 @@ transport-agnostic. What is *not* small:
 
 ## OPEN — the non-compliance verdict is NOT closed by this ADR
 
-`csms-server/AUDIT-UAT-PROD-MIRROR.md:141` (§1.3, 2026-04-28) states:
+`csms-server/AUDIT-UAT-PROD-MIRROR.md`, §1.3 "Architectural decision: pure mTLS, sidecar MQTT subscriber"
+(2026-04-28), states:
 
 > The current csms-server uses `EmqxApiPublisher` (POST `/api/v5/publish` to EMQX REST
 > API) for outbound and HTTP webhook for inbound. This is **sandbox pattern**, not
@@ -118,9 +124,10 @@ bridge-side ADR can make, and this ADR does not make it.
 **What would settle it,** either way:
 
 - A finding on whether OSPP actually constrains the server→station transport at all.
-  Note the spec is weaker here than §1.3 assumes: `spec/02-transport.md:159` says the
-  server **SHOULD** use shared subscriptions, and `spec/01-architecture.md:530` places
-  deployment topology explicitly outside OSPP's scope. Neither text names a required
+  Note the spec is weaker here than §1.3 assumes: `spec/02-transport.md`, section 2.3
+  Server Subscription Patterns, says the server **SHOULD** use shared subscriptions, and
+  `spec/01-architecture.md`, section 8 Scope and Boundaries (its Deployment Topology row),
+  places deployment topology explicitly outside OSPP's scope. Neither text names a required
   *publish* mechanism.
 - If it does not, an amendment retracting the "not OSPP-compliant" clause for outbound.
 - If it does, a plan — at which point the six items above are the cost, and this ADR is
@@ -134,8 +141,9 @@ Related, and recorded here for the same reason: the bridge subscribes to
 `ospp/v1/stations/+/to-server` **plainly**, not `$share/ospp-servers/...`, and this is
 deliberate.
 
-`spec/02-transport.md:159` says the server **SHOULD** use shared subscriptions; §7.3
-(`:499-509`) claims they give "High availability — if one server fails, messages are
+`spec/02-transport.md`, section 2.3 Server Subscription Patterns, says the server
+**SHOULD** use shared subscriptions; its section 7.3 Shared Subscriptions claims they give
+"High availability — if one server fails, messages are
 routed to surviving servers."
 
 **That benefit does not hold for a single-member group, and was measured not to.**

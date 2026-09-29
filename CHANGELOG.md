@@ -41,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `01-architecture.md` section 3.1 Identifier Format, and csms-server's
   `MessageDispatcher::dispatch()` and `MessageFactory::fromJson()`, whose deduplication
   statements have since moved within their files.
+- `docs/ADR-0001-outbound-path-removed.md`: its 12 line citations are names of what the lines
+  held on 2026-08-18, the ADR's date - csms-server at `e12b10e7`, the spec at v0.23.0. The
+  ADR's claims are unchanged.
 
 ### Internal
 
