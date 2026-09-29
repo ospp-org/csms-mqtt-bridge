@@ -26,7 +26,7 @@ import {
   STATION_INBOUND_TOPIC,
   startMqttClient,
 } from '../mqtt.js';
-import type { IncomingEnvelope, RedisBridge } from '../redis.js';
+import type { IncomingEnvelope, QueueDurability, RedisBridge } from '../redis.js';
 import { oldestInboundInFlight, resetState, state } from '../state.js';
 
 // ── Test doubles ────────────────────────────────────────────────────────────
@@ -83,7 +83,9 @@ const makeFakeRedis = (): FakeRedisBridge => {
   return {
     pushed,
     start: vi.fn((): Promise<void> => Promise.resolve()),
-    assertQueueDurable: vi.fn((): Promise<void> => Promise.resolve()),
+    assertQueueDurable: vi.fn(
+      (): Promise<QueueDurability> => Promise.resolve({ durable: true, policy: 'noeviction' }),
+    ),
     pushIncoming: vi.fn((env: IncomingEnvelope): Promise<void> => {
       pushed.push(env);
       return Promise.resolve();

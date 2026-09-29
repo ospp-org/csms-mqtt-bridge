@@ -27,6 +27,15 @@ export interface IncomingEnvelope {
   properties: Record<string, unknown> | null;
 }
 
+/**
+ * What assertQueueDurable() found, when it did not refuse. `durable: false` is reached only
+ * with REDIS_REQUIRE_NOEVICTION=false, which downgrades the refusal to a warning; `policy`
+ * is then the policy the queue Redis reported, or 'undeterminable'.
+ */
+export type QueueDurability =
+  | { durable: true; policy: 'noeviction' }
+  | { durable: false; policy: string };
+
 export interface RedisBridge {
   /**
    * Connect (lazyConnect) and wait until the client is ready. Idempotent: a
@@ -43,8 +52,11 @@ export interface RedisBridge {
    *
    * With REDIS_REQUIRE_NOEVICTION=false this warns and counts instead of
    * rejecting. It never makes the underlying loss safe.
+   *
+   * Resolves with what it found, so a caller can tell an asserted `noeviction` from a
+   * downgraded refusal: both used to resolve the same undefined.
    */
-  assertQueueDurable(): Promise<void>;
+  assertQueueDurable(): Promise<QueueDurability>;
   pushIncoming(envelope: IncomingEnvelope): Promise<void>;
   quit(): Promise<void>;
   isReady(): boolean;
@@ -145,7 +157,7 @@ export const createRedisBridge = (
         policy = null;
       }
 
-      if (policy === 'noeviction') return;
+      if (policy === 'noeviction') return { durable: true, policy: 'noeviction' };
 
       queueDurabilityViolationsTotal.inc({ policy: policy ?? UNDETERMINABLE });
 
@@ -170,6 +182,7 @@ export const createRedisBridge = (
         { policy: policy ?? UNDETERMINABLE, redisRequireNoeviction: false },
         `[QUEUE_DURABILITY] ${message}`,
       );
+      return { durable: false, policy: policy ?? UNDETERMINABLE };
     },
 
     async pushIncoming(envelope) {

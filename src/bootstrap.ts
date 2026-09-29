@@ -13,9 +13,11 @@ export interface BootstrapDeps {
 /**
  * Ordered startup. The order is load-bearing, not cosmetic:
  *
- *  1. `redis.start()` — resolves on 'ready'. Both the inbound push and the
- *     outbound loop need the connection.
- *  2. `redis.assertQueueDurable()` — refuse a queue Redis that can evict.
+ *  1. `redis.start()` — resolves on 'ready'. The durability check and the inbound
+ *     push both need the connection.
+ *  2. `redis.assertQueueDurable()` — refuse a queue Redis that can evict. With
+ *     REDIS_REQUIRE_NOEVICTION=false it warns instead and startup goes on; the
+ *     startup line then says durability was NOT asserted and names the policy.
  *  3. only then construct the MQTT client, which immediately subscribes.
  *
  * Steps 2 and 3 must not be reordered or run concurrently. The MQTT client acks
@@ -28,14 +30,21 @@ export interface BootstrapDeps {
  * that was followed by an unconditional, synchronous `startMqttClient(...)`: the
  * documented ordering was never actually implemented, and only the ioredis
  * offline queue kept it from misbehaving. Reported in csms-server
- * docs/audits/adjudication/RECON-WIRE-LIFECYCLES.md:1345-1346.
+ * docs/audits/adjudication/RECON-WIRE-LIFECYCLES.md, under its ORDERING heading.
  */
 export const bootstrap = async ({ redis, startMqtt, logger }: BootstrapDeps): Promise<MqttBridge> => {
   await redis.start();
   logger.info('redis ready; asserting queue durability before touching the broker');
 
-  await redis.assertQueueDurable();
-  logger.info('queue durability asserted (maxmemory-policy=noeviction)');
+  const durability = await redis.assertQueueDurable();
+  if (durability.durable) {
+    logger.info('queue durability asserted (maxmemory-policy=noeviction)');
+  } else {
+    logger.warn(
+      { policy: durability.policy, redisRequireNoeviction: false },
+      `queue durability NOT asserted (maxmemory-policy=${durability.policy}); REDIS_REQUIRE_NOEVICTION=false downgraded the refusal, starting anyway`,
+    );
+  }
 
   return startMqtt();
 };

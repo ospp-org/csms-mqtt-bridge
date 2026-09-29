@@ -154,7 +154,12 @@ describe.skipIf(!url)('eviction — a message is DELIVERED or UNACKED, never ack
     await admin.config('SET', 'maxmemory-policy', 'noeviction');
     const bridge = createRedisBridge(cfgFor(key('guard')));
     await bridge.start();
-    await expect(bridge.assertQueueDurable()).resolves.toBeUndefined();
+    // This pinned toBeUndefined(), which a downgraded refusal resolved as well. A real
+    // Redis reporting noeviction now has to be reported as durable, by that policy.
+    await expect(bridge.assertQueueDurable()).resolves.toEqual({
+      durable: true,
+      policy: 'noeviction',
+    });
     await bridge.quit();
   });
 });

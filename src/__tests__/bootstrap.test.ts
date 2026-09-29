@@ -5,13 +5,15 @@ import { describe, expect, it, vi } from 'vitest';
 import { bootstrap } from '../bootstrap.js';
 import type { Config } from '../config.js';
 import type { MqttBridge } from '../mqtt.js';
-import type { RedisBridge } from '../redis.js';
+import type { QueueDurability, RedisBridge } from '../redis.js';
 import { createRedisBridge } from '../redis.js';
+
+const DURABLE: QueueDurability = { durable: true, policy: 'noeviction' };
 
 const makeRedis = (over: Partial<RedisBridge> = {}): RedisBridge =>
   ({
     start: vi.fn((): Promise<void> => Promise.resolve()),
-    assertQueueDurable: vi.fn((): Promise<void> => Promise.resolve()),
+    assertQueueDurable: vi.fn((): Promise<QueueDurability> => Promise.resolve(DURABLE)),
     pushIncoming: vi.fn(),
     quit: vi.fn(),
     isReady: vi.fn(() => true),
@@ -36,7 +38,7 @@ describe('bootstrap — ordered startup', () => {
       }),
       assertQueueDurable: vi.fn(() => {
         calls.push('assert');
-        return Promise.resolve();
+        return Promise.resolve(DURABLE);
       }),
     });
     const startMqtt = vi.fn((): MqttBridge => {
@@ -73,7 +75,7 @@ describe('bootstrap — ordered startup', () => {
   });
 
   it('does NOT assert durability when Redis never connected', async () => {
-    const assertQueueDurable = vi.fn((): Promise<void> => Promise.resolve());
+    const assertQueueDurable = vi.fn((): Promise<QueueDurability> => Promise.resolve(DURABLE));
     const redis = makeRedis({
       start: vi.fn(() => Promise.reject(new Error('down'))),
       assertQueueDurable,

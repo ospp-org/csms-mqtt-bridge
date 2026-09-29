@@ -175,7 +175,13 @@ describe('assertQueueDurable', () => {
     const fake = makeFakeRedisClient();
     fake.config = vi.fn(() => Promise.resolve(['maxmemory-policy', 'noeviction']));
     const bridge = createRedisBridge(durableConfig(), { client: fake as unknown as Redis });
-    await expect(bridge.assertQueueDurable()).resolves.toBeUndefined();
+    // This pinned toBeUndefined(), the same value the downgraded branch below resolved, so
+    // no caller could tell an asserted noeviction from a downgraded refusal and bootstrap
+    // logged noeviction for both. It resolves with what it found.
+    await expect(bridge.assertQueueDurable()).resolves.toEqual({
+      durable: true,
+      policy: 'noeviction',
+    });
     expect(fake.config).toHaveBeenCalledWith('GET', 'maxmemory-policy');
   });
 
@@ -218,7 +224,13 @@ describe('assertQueueDurable', () => {
       client: fake as unknown as Redis,
       logger,
     });
-    await expect(bridge.assertQueueDurable()).resolves.toBeUndefined();
+    // This pinned toBeUndefined(): the value that let bootstrap follow this very warning
+    // with 'queue durability asserted (maxmemory-policy=noeviction)'. A downgraded refusal
+    // resolves as not durable, naming the policy.
+    await expect(bridge.assertQueueDurable()).resolves.toEqual({
+      durable: false,
+      policy: 'allkeys-lru',
+    });
     expect(warn).toHaveBeenCalledOnce();
     const body = await metricsRegister.metrics();
     expect(body).toMatch(/csms_bridge_queue_durability_violations_total\{[^}]*policy="allkeys-lru"[^}]*\} 1/);
