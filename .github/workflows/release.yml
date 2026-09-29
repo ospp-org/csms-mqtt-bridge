@@ -31,6 +31,14 @@ jobs:
   release:
     name: Build and publish multi-arch image
     runs-on: ubuntu-latest
+    # Without a limit GitHub gives a job 360 minutes. A release publishes in about 3
+    # (v0.1.5 to v0.1.7, and v0.2.0 on its second attempt), the arm64 `npm ci` under QEMU
+    # included: the version bump changes package.json, so that layer is rebuilt on every
+    # release. The first v0.2.0 attempt hung in it - "qemu: uncaught target signal 4
+    # (Illegal instruction) - core dumped", then no output for 58 minutes until it was
+    # cancelled by hand. 20 minutes gives a normal release over six times its usual
+    # duration and fails a hang like that one in 20 minutes instead of 360.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
