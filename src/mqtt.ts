@@ -47,9 +47,8 @@ export const STATION_INBOUND_TOPIC = 'ospp/v1/stations/+/to-server';
  * instance's, even if the first is still up. Per-instance topic gives each
  * clientId its own retained status; LWT cleans it up gracefully on disconnect.
  *
- * The OSPP spec only defines `ospp/v1/stations/*` topics
- * (spec/spec/02-transport.md:112-115); server-level status is bridge-internal
- * convention.
+ * The OSPP spec only defines `ospp/v1/stations/*` topics (02-transport.md, section
+ * 2.1 Topic Patterns); server-level status is bridge-internal convention.
  */
 export const serverStatusTopicFor = (clientId: string): string =>
   `ospp/v1/servers/${clientId}/status`;

@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in 0.2.0 - nor that the MQTT client is constructed only over a queue Redis proven
   non-evicting. With `REDIS_REQUIRE_NOEVICTION=false` it is constructed after a warning
   when the policy is not `noeviction` or cannot be read.
+- The OSPP spec is cited by section heading instead of by line, in the README,
+  `package.json` and `src/mqtt.ts`: four of the five places cited no longer held the
+  cited text at v0.44.0. Two of the sections, "3.2 MQTT Setup" and the "Server Core"
+  conformance checklist, ask for a shared subscription; the README now says the bridge
+  holds a plain one, and `package.json` cites only "The Three Actors".
 
 ### Internal
 
