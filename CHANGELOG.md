@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- README: the repository layout lists the tracked tree. It still showed the initial
+  scaffold - `src/index.ts` as a placeholder, `ci.yml` as the only workflow - and none of
+  the other `src/` modules, `docs/` or `release.yml`.
 - `src/index.ts` no longer says that stopping MQTT drains outbound - the outbound path went
   in 0.2.0 - nor that the MQTT client is constructed only over a queue Redis proven
   non-evicting. With `REDIS_REQUIRE_NOEVICTION=false` it is constructed after a warning

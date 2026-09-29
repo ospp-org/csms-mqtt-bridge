@@ -329,14 +329,41 @@ Plus `collectDefaultMetrics` (event-loop lag, GC, heap).
 
 ```
 .
-├── Dockerfile               # multi-stage build
-├── eslint.config.js         # flat config + typescript-eslint strict
-├── prettier.config.js
-├── tsconfig.json            # strict mode, ES2022 + NodeNext
+├── .dockerignore
+├── .editorconfig
+├── .env.example                           # environment variables, a copy-paste starting point
+├── .github/workflows/
+│   ├── ci.yml                             # lint + typecheck + test + build on push/PR to main
+│   └── release.yml                        # multi-arch image to ghcr.io on a v*.*.* tag push
+├── .gitignore
+├── .nvmrc                                 # Node 22
+├── .prettierignore
+├── CHANGELOG.md
+├── Dockerfile                             # multi-stage build
+├── LICENSE
+├── README.md
+├── docs/
+│   ├── ADR-0001-outbound-path-removed.md  # why the Redis outbound path was removed
+│   ├── AUDIT-MQTT-BRIDGE.md               # audit of the bridge at v0.1.7
+│   ├── AUDIT-UAT-PROD-MIRROR.md           # the parent audit (v2), a frozen copy
+│   └── REDIS-QUEUE-CONTRACT.md            # the Redis queue contract with csms-server
+├── eslint.config.js                       # flat config + typescript-eslint strict
+├── package-lock.json
 ├── package.json
+├── prettier.config.js
 ├── src/
-│   └── index.ts             # entrypoint (placeholder until Phase 0.3)
-└── .github/workflows/ci.yml # lint + typecheck + test + build
+│   ├── __tests__/                         # vitest suites
+│   ├── bootstrap.ts                       # ordered startup: Redis, maxmemory-policy, MQTT
+│   ├── config.ts                          # env-var loader, validated with zod
+│   ├── health.ts                          # the /healthz report
+│   ├── index.ts                           # entrypoint: startup, /metrics and /healthz, shutdown
+│   ├── metrics.ts                         # Prometheus registry and the csms_bridge_* metrics
+│   ├── mqtt.ts                            # MQTT client: mTLS, persistent session, manual PUBACK
+│   ├── redis.ts                           # LPUSH onto REDIS_QUEUE_INCOMING, maxmemory-policy check
+│   ├── state.ts                           # process state read by metrics, health and the watchdog
+│   └── watchdog.ts                        # the three stuck conditions on which the bridge exits
+├── tsconfig.build.json                    # the build: emits dist/, tests excluded
+└── tsconfig.json                          # strict mode, ES2022 + NodeNext
 ```
 
 ## Related
