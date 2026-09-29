@@ -1,8 +1,10 @@
 # csms-mqtt-bridge
 
 Node.js sidecar that bridges the EMQX MQTT broker (mTLS, MQTT 5, persistent
-session) and a Redis queue for the CSMS server. The CSMS application
-(Laravel/PHP) communicates with stations exclusively through this sidecar.
+session) and a Redis queue for the CSMS server. What stations send reaches the
+CSMS application (Laravel/PHP) through this sidecar; what the application sends
+to stations does not - it goes over the EMQX REST API, see
+[Architecture](#architecture).
 
 OSPP spec: `guides/implementors-guide.md`, sections "The Three Actors" (the server talks to
 stations over MQTT) and "2.4 MQTT Connection Details" (stations publish on

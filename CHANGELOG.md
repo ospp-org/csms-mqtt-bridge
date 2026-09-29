@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README, `package.json` and `docs/REDIS-QUEUE-CONTRACT.md` said "Redis queues". There has
   been one since 0.2.0 - `REDIS_QUEUE_INCOMING`, whose only writer is `pushIncoming` - so each
   now says "a Redis queue".
+- README: the opening no longer says the CSMS application "communicates with stations
+  exclusively through this sidecar". Station messages reach csms-server through it
+  (`MqttConsume` reads `mqtt:incoming`); what the application sends goes through
+  `MqttStationGateway` and `EmqxApiPublisher` to the EMQX REST API, as the Architecture
+  section already said.
 
 ### Internal
 
