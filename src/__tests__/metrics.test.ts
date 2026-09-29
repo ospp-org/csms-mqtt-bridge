@@ -84,7 +84,7 @@ describe('build info', () => {
 // fleet (Redis down, ingest wedged, process alive) was invisible to Prometheus.
 // These gauges are the readers; they are collected at scrape time, not cached.
 describe('bridge state gauges', () => {
-  it('renders connection state, in-flight count and reconnects at scrape time', async () => {
+  it('renders the MQTT and Redis connection state and the reconnect count at scrape time', async () => {
     resetState();
     state.mqttConnected = true;
     state.redisConnected = false;

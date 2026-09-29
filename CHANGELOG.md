@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the release job has since 0.2.1. It runs in under a minute: 16 to 51 seconds over its 20
   runs up to v0.2.1. A test now requires a job-level `timeout-minutes` below 360 on every
   job of every workflow.
+- The scrape-time state gauges test is titled for what it asserts, the MQTT and Redis
+  connection state and the reconnect count. Its title still named the in-flight count that
+  went with the outbound path in 0.2.0.
 
 ## [0.2.1] - 2026-09-29
 
