@@ -200,7 +200,7 @@ required configuration.
 ### TLS SNI when connecting via an internal hostname
 
 > ⚠️ **Known limitation (mqtt.js v5.15.1)**: `MQTT_SERVERNAME` is currently
-> ignored by `mqtt.js` due to an upstream bug at `connect/tls.js:28`
+> ignored by `mqtt.js` due to an upstream bug in `buildStream` in `connect/tls.js`
 > (`opts.servername = opts.host` runs unconditionally for hostname targets,
 > overwriting the user-provided `servername`). The variable is plumbed
 > through correctly by this bridge — it will start working the day the

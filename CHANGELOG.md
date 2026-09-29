@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `src/health.ts`: the comment on `redisReady` no longer says "Both ioredis clients report
   ready". `isReady()` has read one client since 0.2.0 removed the dedicated blocking one; the
   comment was true when `/healthz` was written and went stale with that removal.
+- The mqtt.js SNI bug is named by function, not by line. The README and the 0.1.3 and 0.1.4
+  entries below put it at a line of `connect/tls.js`; it is `buildStream` in that file, where
+  at mqtt.js 5.15.1, the pinned version, `opts.servername = opts.host` runs for every host
+  that is not an IP literal, overwriting the `servername` the bridge passes.
 
 ### Internal
 
@@ -162,7 +166,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README: removed broken placeholder link to upstream `mqtt.js` issue
   (decision: not filing upstream — the Docker network alias workaround
   is the permanent solution). The surrounding caveat already cites the
-  upstream bug location (`connect/tls.js:28`) and explains the limitation.
+  upstream bug location (`buildStream` in `connect/tls.js`) and explains the limitation.
 
 ## [0.1.3] - 2026-04-28
 
@@ -170,7 +174,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - README: prominent caveat at the top of the "TLS SNI when connecting via
   an internal hostname" section noting that `MQTT_SERVERNAME` is currently
-  ignored by `mqtt.js@5.15.1` due to an upstream bug at `connect/tls.js:28`
+  ignored by `mqtt.js@5.15.1` due to an upstream bug in `buildStream` in `connect/tls.js`
   (`opts.servername = opts.host` runs unconditionally for hostname targets,
   overwriting the user-provided value). Documents the Docker network alias
   workaround — set up an intra-Docker alias matching the broker cert SAN so
