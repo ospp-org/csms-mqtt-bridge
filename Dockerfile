@@ -49,8 +49,10 @@ USER node
 # unhealthy bridge actually marks the container unhealthy.
 #
 # NOTE: a compose-level `healthcheck:` OVERRIDES this one. csms-server's
-# docker-compose.yml sets `test: ["CMD-SHELL", "kill -0 1"]`, which only asks
-# whether PID 1 exists — that override should be dropped so this applies.
+# docker-compose.yml set `test: ["CMD-SHELL", "kill -0 1"]`, which only asks
+# whether PID 1 exists, up to bridge 0.1.7; from 0.2.0 it leaves this one in place.
+# A health check marks the container unhealthy and restarts nothing: a stuck bridge
+# is restarted because it exits itself (src/watchdog.ts) and the restart policy runs.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=3 \
   CMD wget -q -O /dev/null "http://127.0.0.1:${METRICS_PORT:-9090}/healthz" || exit 1
 

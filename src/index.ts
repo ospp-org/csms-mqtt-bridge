@@ -12,9 +12,10 @@ import { ConfigError, loadConfig, sanitizedConfigForLog } from './config.js';
 import { buildHealthReport, healthStatusCode } from './health.js';
 import { register as metricsRegister, setBuildInfo } from './metrics.js';
 import type { MqttBridge } from './mqtt.js';
-import { startMqttClient } from './mqtt.js';
+import { connectToBroker, startMqttClient } from './mqtt.js';
 import type { RedisBridge } from './redis.js';
 import { createRedisBridge } from './redis.js';
+import { startWatchdog } from './watchdog.js';
 
 // Resolve package.json relative to the compiled entrypoint so the same path
 // works for `node dist/index.js` (dist/../package.json) and `tsx src/index.ts`
@@ -66,11 +67,31 @@ const redis: RedisBridge = createRedisBridge(config, { logger });
 
 let mqtt: MqttBridge | null = null;
 
+// Started with the process, not after bootstrap: the process starts with no broker
+// connection, so a broker never reached is caught as surely as one lost later. On any
+// of the three stuck conditions (src/watchdog.ts) the bridge exits non-zero through
+// the ordinary shutdown, and the container's restart policy restarts it.
+const watchdog = startWatchdog({
+  limits: {
+    mqttDownMs: config.WATCHDOG_MQTT_DOWN_MS,
+    inboundStallMs: config.WATCHDOG_INBOUND_STALL_MS,
+  },
+  onStuck: (stuck) => {
+    logger.fatal({ stuck }, 'bridge is stuck; exiting so the container restart policy restarts it');
+    shutdown('watchdog', 1);
+  },
+});
+
 void (async (): Promise<void> => {
   try {
     mqtt = await bootstrap({
       redis,
-      startMqtt: () => startMqttClient(config, redis, logger),
+      // A refused or downgraded inbound subscription is logged where it is read
+      // (src/mqtt.ts); here it only ends the process the same way the watchdog does.
+      startMqtt: () =>
+        startMqttClient(config, redis, logger, connectToBroker, () => {
+          shutdown('subscription', 1);
+        }),
       logger,
     });
   } catch (err) {
@@ -121,15 +142,23 @@ metricsServer.listen(config.METRICS_PORT, () => {
 
 // Reverse of startup: stop MQTT (drains outbound, publishes offline, ends),
 // then quit Redis. Bounded by SHUTDOWN_TIMEOUT_MS so a wedged peer can't
-// keep the process alive past its grace period.
+// keep the process alive past its grace period - which is also what bounds a
+// shutdown the watchdog starts while a Redis command is stuck.
+//
+// exitCode 1 for a bridge ending itself (the watchdog, a refused subscription): the
+// restart is the point, and a non-zero exit reads as the failure it is.
 let shuttingDown = false;
-const shutdown = (signal: NodeJS.Signals): void => {
+const shutdown = (
+  signal: NodeJS.Signals | 'watchdog' | 'subscription',
+  exitCode: 0 | 1 = 0,
+): void => {
   if (shuttingDown) {
     logger.warn({ signal }, 'shutdown already in progress, ignoring duplicate signal');
     return;
   }
   shuttingDown = true;
-  logger.info({ signal }, 'shutdown initiated');
+  watchdog.stop();
+  logger.info({ signal, exitCode }, 'shutdown initiated');
 
   const deadline = setTimeout(() => {
     logger.error(
@@ -151,8 +180,8 @@ const shutdown = (signal: NodeJS.Signals): void => {
           resolve();
         });
       });
-      logger.info('shutdown complete');
-      process.exit(0);
+      logger.info({ exitCode }, 'shutdown complete');
+      process.exit(exitCode);
     } catch (err) {
       logger.error({ err }, 'error during shutdown');
       process.exit(1);

@@ -35,6 +35,13 @@ const positiveInt = z.coerce
   .int({ message: 'must be an integer' })
   .nonnegative({ message: 'must be ≥ 0' });
 
+// A watchdog limit. Floored at one second: a smaller value would end a bridge that is
+// merely between two messages or two reconnect attempts.
+const watchdogLimitMs = z.coerce
+  .number({ message: 'must be a number' })
+  .int({ message: 'must be an integer' })
+  .min(1000, { message: 'must be >= 1000 (ms)' });
+
 const port = z.coerce
   .number({ message: 'must be a number' })
   .int({ message: 'must be an integer' })
@@ -104,6 +111,16 @@ const envSchema = z.object({
   // the refusal to a warning and a counter, it does not make the loss safe.
   // Mirrors csms-server MqttConsume::assertQueueRedisDurable() on the reader side.
   REDIS_REQUIRE_NOEVICTION: booleanFromEnv.default(true),
+
+  // Watchdog (src/watchdog.ts): how long each stuck condition is tolerated before the
+  // bridge exits non-zero, so the container's restart policy restarts it. A restart
+  // loses nothing - the session is persistent and nothing stuck was acknowledged.
+  // The broker connection down (a broker never reached since start counts); 120 s rides
+  // out a broker restart (tens of seconds) without a bridge restart.
+  WATCHDOG_MQTT_DOWN_MS: watchdogLimitMs.default(120_000),
+  // One inbound message in hand (its Redis push unsettled), or one left unacknowledged
+  // waiting for a new connection.
+  WATCHDOG_INBOUND_STALL_MS: watchdogLimitMs.default(60_000),
 });
 
 export type Config = z.infer<typeof envSchema>;
@@ -155,6 +172,8 @@ export const sanitizedConfigForLog = (
   mqttReconnectPeriod: config.MQTT_RECONNECT_PERIOD,
   mqttConnectTimeout: config.MQTT_CONNECT_TIMEOUT,
   mqttSessionExpiryInterval: config.MQTT_SESSION_EXPIRY_INTERVAL,
+  watchdogMqttDownMs: config.WATCHDOG_MQTT_DOWN_MS,
+  watchdogInboundStallMs: config.WATCHDOG_INBOUND_STALL_MS,
   ...(config.MQTT_CA_PATH === undefined ? {} : { caPath: config.MQTT_CA_PATH }),
   ...(config.MQTT_SERVERNAME === undefined ? {} : { servername: config.MQTT_SERVERNAME }),
 });

@@ -98,6 +98,8 @@ for a copy-paste starting point.
 | `MQTT_SESSION_EXPIRY_INTERVAL` | `3600`          | MQTT 5 Session Expiry Interval in seconds; with `clean:false` keeps the subscription + its queued QoS-1 messages alive across a brief disconnect (must be > 0).                                                                                                                                                                                                                                                                                                                                                                |
 | `REDIS_QUEUE_INCOMING`         | `mqtt:incoming` | Redis list key for inbound messages from broker → server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `REDIS_REQUIRE_NOEVICTION`     | `true`          | Refuse to start when the queue Redis reports a `maxmemory-policy` other than `noeviction`. Under an eviction policy an `LPUSH` reports success, the bridge PUBACKs, the broker drops its copy, and Redis discards the entry — the message is lost on both sides with no error (measured: 400 pushes → 400 acked, 16 surviving). Fails closed: an undeterminable policy is treated as unsafe. `false` downgrades the refusal to a warning plus `csms_bridge_queue_durability_violations_total`; it does not make the loss safe. |
+| `WATCHDOG_MQTT_DOWN_MS`        | `120000`        | How long the broker connection may stay down (a broker never reached since start counts) before the bridge exits non-zero for its restart policy to restart it. At least `1000`. See [A stuck bridge exits](#a-stuck-bridge-exits).                                                                                                                                                                                                                                                                                            |
+| `WATCHDOG_INBOUND_STALL_MS`    | `60000`         | How long one inbound message may stay in hand (its Redis push unsettled), or stay unacknowledged waiting for a new connection, before the bridge exits non-zero. At least `1000`.                                                                                                                                                                                                                                                                                                                                              |
 
 ## Build & run
 
@@ -271,10 +273,39 @@ attached to the broker, and can it write the Redis queue.
 a quiet fleet is not a broken bridge, and a probe that failed on silence would flap on
 a deployment averaging ~100 messages a day.
 
-The image carries a `HEALTHCHECK` that calls this route. **A compose-level
-`healthcheck:` overrides it**: `csms-server`'s `docker-compose.yml` currently sets
-`test: ["CMD-SHELL", "kill -0 1"]`, which only asks whether PID 1 exists, so a fully
-wedged bridge still reports healthy. That override should be dropped.
+The image carries a `HEALTHCHECK` that calls this route. A compose-level
+`healthcheck:` overrides it; `csms-server`'s compose files set
+`test: ["CMD-SHELL", "kill -0 1"]` up to bridge 0.1.7 and leave the image's check in
+place from 0.2.0.
+
+A health check marks a container unhealthy; it does not restart it. What restarts a
+stuck bridge is the bridge itself exiting - see below.
+
+### A stuck bridge exits
+
+The container's restart policy restarts a bridge that exits and does nothing for one
+that stays alive and stuck. The bridge watches for the three ways it can, and on any of
+them logs `bridge is stuck` at `fatal` with the condition, then exits **1** through the
+ordinary shutdown (bounded by `SHUTDOWN_TIMEOUT_MS`):
+
+| Condition         | What it is                                                                                                                                                                                                                                                           | Limit                       |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| `mqtt_down`       | The broker connection lost and not back - mqtt.js retries for as long as the broker refuses it (an expired or rotated certificate, an ACL that no longer admits the client id), and never with `MQTT_RECONNECT_PERIOD=0`. A broker never reached since start counts. | `WATCHDOG_MQTT_DOWN_MS`     |
+| `inbound_stalled` | One inbound message in hand past the limit: its Redis push neither resolved nor rejected (`maxRetriesPerRequest: null` queues a command while Redis is gone). mqtt.js handles inbound packets one at a time, so every station waits behind it.                       | `WATCHDOG_INBOUND_STALL_MS` |
+| `unacked_pending` | A push was refused, so the PUBACK was withheld and the broker kept the message - and resends it only on a new connection (`retry_interval = infinity` on the deployed EMQX). After `max_inflight` (32) such messages the broker delivers nothing more.               | `WATCHDOG_INBOUND_STALL_MS` |
+
+A restart loses nothing in any of them: the session is persistent, nothing in hand or
+refused was acknowledged, and the broker resends every unacknowledged message on the
+next connection.
+
+### The inbound grant
+
+After each SUBSCRIBE the bridge reads the SUBACK. A refusal (a reason code with the
+`0x80` bit - `135` Not authorized is what an ACL deny answers) or a grant below the
+QoS 1 it asked for is logged at `fatal` and the bridge exits **1**: at QoS 0 the broker
+queues nothing for the persistent session and waits for no PUBACK, so the manual ack
+guards nothing. A SUBSCRIBE cut off by a closing connection is not a refusal; the next
+connection subscribes again.
 
 ### `GET /metrics`
 

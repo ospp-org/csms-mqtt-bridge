@@ -8,6 +8,7 @@ import type {
   IConnackPacket,
   IDisconnectPacket,
   IPublishPacket,
+  ISubscriptionGrant,
   MqttClient,
 } from 'mqtt';
 import type { Logger } from 'pino';
@@ -53,12 +54,83 @@ export const STATION_INBOUND_TOPIC = 'ospp/v1/stations/+/to-server';
 export const serverStatusTopicFor = (clientId: string): string =>
   `ospp/v1/servers/${clientId}/status`;
 
-// Station ID format per spec/spec/01-architecture.md:127 + glossary.md:331-332:
-// `stn_` prefix + 8 or more lowercase hex chars. Upper bound 60 = csms-server's
-// 64-char StationId max minus the 4-char prefix.
+// The station id format csms-server issues, which this pattern must equal: `stn_` + 8 to
+// 60 lowercase hex characters. csms-server writes stations.station_id through one rule
+// (RegisterStationRequest's `stationId`, `^stn_[a-f0-9]{8,60}$`), and its CsrValidator
+// makes a station certificate's CN - the client id the broker admits, and the station
+// segment of the topic - equal to that id. The spec (01-architecture.md, section 3.1
+// Identifier Format; glossary, Station) sets no upper bound; 60 is csms-server's, its
+// VARCHAR(64) column less the prefix. The broker's ACL admits more than this - any
+// `stn_` client id, and `SIM-` / `sim-` ones on their own topics - and none of those
+// names can be issued by csms-server.
 const STATION_TOPIC_RE = /^ospp\/v1\/stations\/(stn_[a-f0-9]{8,60})\/to-server$/;
 
 export type MqttConnector = (url: string, opts: IClientOptions) => MqttClient;
+
+/** The production connector; tests pass a fake one. */
+export const connectToBroker: MqttConnector = mqtt.connect.bind(mqtt);
+
+/**
+ * Called when the bridge meets a condition it must not run past - today, an inbound
+ * subscription the broker refused or downgraded. index.ts ends the process on it, so
+ * the container's restart policy restarts the bridge and the failure shows as a
+ * restart, not as a connected bridge that receives nothing.
+ */
+export type OnFatal = (err: Error) => void;
+
+/**
+ * The QoS the inbound subscription must be granted. The manual ack below is the
+ * at-least-once anchor only at QoS 1: at QoS 0 the broker queues nothing for the
+ * persistent session and waits for no PUBACK, so withholding one guards nothing.
+ */
+const REQUIRED_INBOUND_QOS = 1;
+
+/** The part of a SUBACK read here - mqtt-packet's ISubackPacket, which mqtt does not re-export. */
+interface SubackLike {
+  granted?: unknown;
+}
+
+type GrantOutcome =
+  | { kind: 'granted' }
+  | { kind: 'interrupted'; detail: string }
+  | { kind: 'refused' | 'downgraded'; detail: string };
+
+/**
+ * Reads the SUBACK for STATION_INBOUND_TOPIC. mqtt.js 5 answers a reason code with the
+ * 0x80 bit (135 Not authorized is what an ACL deny sends) with an error AND the SUBACK,
+ * as the third argument and as `err.packet`. An error with no SUBACK is a SUBSCRIBE
+ * flushed by a closing stream ('Connection closed'): nothing was refused, and the next
+ * connection's 'connect' subscribes again.
+ */
+export const readGrant = (
+  err: Error | null | undefined,
+  granted: readonly ISubscriptionGrant[] | undefined,
+  suback?: SubackLike,
+): GrantOutcome => {
+  if (err) {
+    const packet = suback ?? (err as Error & { packet?: SubackLike }).packet;
+    const codes: unknown = packet?.granted;
+    if (!Array.isArray(codes)) return { kind: 'interrupted', detail: err.message };
+    return {
+      kind: 'refused',
+      detail: `SUBACK reason code ${codes.map((c) => JSON.stringify(c)).join(', ')} (${err.message})`,
+    };
+  }
+  const grant = granted?.find((g) => g.topic === STATION_INBOUND_TOPIC);
+  if (grant === undefined) {
+    return { kind: 'refused', detail: `the SUBACK carried no grant for ${STATION_INBOUND_TOPIC}` };
+  }
+  if (grant.qos >= 0x80) {
+    return { kind: 'refused', detail: `SUBACK reason code ${grant.qos.toString()}` };
+  }
+  if (grant.qos < REQUIRED_INBOUND_QOS) {
+    return {
+      kind: 'downgraded',
+      detail: `granted QoS ${grant.qos.toString()} for the QoS ${REQUIRED_INBOUND_QOS.toString()} asked`,
+    };
+  }
+  return { kind: 'granted' };
+};
 
 export interface MqttBridge {
   readonly client: MqttClient;
@@ -174,11 +246,27 @@ const handleInbound = async (
   );
 };
 
-const registerLifecycleListeners = (client: MqttClient, config: Config, logger: Logger): void => {
+const markDown = (): void => {
+  state.mqttConnected = false;
+  // From the FIRST loss: the watchdog measures how long the connection has been gone,
+  // and mqtt.js follows a close with offline and reconnect attempts.
+  state.mqttDownSince ??= Date.now();
+};
+
+const registerLifecycleListeners = (
+  client: MqttClient,
+  config: Config,
+  logger: Logger,
+  onFatal: OnFatal,
+): void => {
   const statusTopic = serverStatusTopicFor(config.MQTT_CLIENT_ID);
 
   client.on('connect', (packet: IConnackPacket) => {
     state.mqttConnected = true;
+    state.mqttDownSince = null;
+    // A new connection is when the broker resends every message this session left
+    // unacknowledged, so nothing is waiting on a reconnect any more.
+    state.unackedSince = null;
     logger.info(
       {
         reasonCode: packet.reasonCode ?? 0,
@@ -197,15 +285,34 @@ const registerLifecycleListeners = (client: MqttClient, config: Config, logger: 
       },
     );
 
-    client.subscribe(STATION_INBOUND_TOPIC, { qos: 1 }, (err, granted) => {
-      if (err) {
-        logger.error({ err }, 'subscribe failed');
-        return;
-      }
-      // Idempotent: on a resumed session (sessionPresent:true) the subscription
-      // already exists; re-subscribing is a no-op that just re-confirms the grant.
-      logger.info({ granted }, 'subscribed to station inbound topic');
-    });
+    client.subscribe(
+      STATION_INBOUND_TOPIC,
+      { qos: REQUIRED_INBOUND_QOS },
+      (err, granted, suback) => {
+        const outcome = readGrant(err, granted, suback);
+        if (outcome.kind === 'granted') {
+          // Idempotent: on a resumed session (sessionPresent:true) the subscription
+          // already exists; re-subscribing is a no-op that just re-confirms the grant.
+          logger.info({ granted }, 'subscribed to station inbound topic');
+          return;
+        }
+        if (outcome.kind === 'interrupted') {
+          logger.warn(
+            { err, detail: outcome.detail },
+            'subscribe interrupted before its SUBACK; the next connect subscribes again',
+          );
+          return;
+        }
+        // Refused or downgraded: running on would mean a connected bridge that receives
+        // nothing, or one that receives at QoS 0 with nothing held for it.
+        const error = new Error(`inbound subscription ${outcome.kind}: ${outcome.detail}`);
+        logger.fatal(
+          { err: error, requestedQos: REQUIRED_INBOUND_QOS, granted },
+          'inbound subscription not usable; the bridge does not run past it',
+        );
+        onFatal(error);
+      },
+    );
   });
 
   client.on('reconnect', () => {
@@ -214,12 +321,12 @@ const registerLifecycleListeners = (client: MqttClient, config: Config, logger: 
   });
 
   client.on('close', () => {
-    state.mqttConnected = false;
+    markDown();
     logger.warn('mqtt connection closed');
   });
 
   client.on('offline', () => {
-    state.mqttConnected = false;
+    markDown();
     logger.error('mqtt offline');
   });
 
@@ -243,12 +350,23 @@ const registerLifecycleListeners = (client: MqttClient, config: Config, logger: 
  * gate the ack.
  */
 const installManualAck = (client: MqttClient, redis: RedisBridge, logger: Logger): void => {
+  let delivery = 0;
   const wrapped = (packet: IPublishPacket, callback: DoneCallback): void => {
+    // In hand from receipt until the push settles: a push that never settles is how a
+    // blocked Redis writer looks from here, and the watchdog measures it.
+    const inHand = ++delivery;
+    state.inboundInFlight.set(inHand, Date.now());
     handleInbound(packet, redis, logger).then(
       () => {
+        state.inboundInFlight.delete(inHand);
         callback();
       },
       (err: unknown) => {
+        state.inboundInFlight.delete(inHand);
+        // Unacknowledged from here until a new connection: the broker resends it only
+        // then (retry_interval = infinity on the deployed broker), and the watchdog
+        // ends a bridge that leaves it waiting.
+        state.unackedSince ??= Date.now();
         const error = err instanceof Error ? err : new Error(String(err));
         // Counted, not just logged: a refused write is the HEALTHY failure (the
         // broker keeps the message), but it is indistinguishable from silence
@@ -274,12 +392,13 @@ export const startMqttClient = (
   config: Config,
   redis: RedisBridge,
   logger: Logger,
-  connect: MqttConnector = mqtt.connect.bind(mqtt),
+  connect: MqttConnector,
+  onFatal: OnFatal,
 ): MqttBridge => {
   const opts = buildClientOptions(config);
   const client = connect(config.MQTT_BROKER_URL, opts);
 
-  registerLifecycleListeners(client, config, logger);
+  registerLifecycleListeners(client, config, logger, onFatal);
   installManualAck(client, redis, logger);
 
   const stop = async (): Promise<void> => {

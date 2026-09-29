@@ -58,7 +58,9 @@ const runBridge = (env: Record<string, string>, timeoutMs: number): Promise<Exit
     });
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      reject(new Error(`the bridge was still running after ${timeoutMs.toString()} ms:\n${stdout}`));
+      reject(
+        new Error(`the bridge was still running after ${timeoutMs.toString()} ms:\n${stdout}`),
+      );
     }, timeoutMs);
     child.on('exit', (code, signal) => {
       clearTimeout(timer);
@@ -86,9 +88,21 @@ describe.skipIf(!url)('watchdog - a stuck bridge exits so its restart policy res
     execFileSync(
       'openssl',
       [
-        'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes',
-        '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem'),
-        '-days', '1', '-subj', '/CN=csms-itest-watchdog',
+        'req',
+        '-x509',
+        '-newkey',
+        'ec',
+        '-pkeyopt',
+        'ec_paramgen_curve:P-256',
+        '-nodes',
+        '-keyout',
+        join(dir, 'key.pem'),
+        '-out',
+        join(dir, 'cert.pem'),
+        '-days',
+        '1',
+        '-subj',
+        '/CN=csms-itest-watchdog',
       ],
       { stdio: 'ignore' },
     );

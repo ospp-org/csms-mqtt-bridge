@@ -240,6 +240,44 @@ describe('loadConfig — MQTT_SERVERNAME', () => {
   });
 });
 
+// The watchdog's two limits (src/watchdog.ts). A limit under a second would end a
+// bridge that is merely between two messages or two reconnect attempts.
+describe('loadConfig — watchdog limits', () => {
+  it('defaults to 120 s for the broker connection and 60 s for an inbound message', () => {
+    const cfg = loadConfig(validEnv);
+
+    expect(cfg.WATCHDOG_MQTT_DOWN_MS).toBe(120_000);
+    expect(cfg.WATCHDOG_INBOUND_STALL_MS).toBe(60_000);
+  });
+
+  it('coerces both limits from the environment', () => {
+    const cfg = loadConfig({
+      ...validEnv,
+      WATCHDOG_MQTT_DOWN_MS: '300000',
+      WATCHDOG_INBOUND_STALL_MS: '1000',
+    });
+
+    expect(cfg.WATCHDOG_MQTT_DOWN_MS).toBe(300_000);
+    expect(cfg.WATCHDOG_INBOUND_STALL_MS).toBe(1_000);
+  });
+
+  it.each(['WATCHDOG_MQTT_DOWN_MS', 'WATCHDOG_INBOUND_STALL_MS'])(
+    'refuses %s under one second, zero included',
+    (name) => {
+      expect(() => loadConfig({ ...validEnv, [name]: '999' })).toThrow(ConfigError);
+      expect(() => loadConfig({ ...validEnv, [name]: '0' })).toThrow(ConfigError);
+      expect(() => loadConfig({ ...validEnv, [name]: 'soon' })).toThrow(ConfigError);
+    },
+  );
+
+  it('logs both limits at startup', () => {
+    const snapshot = sanitizedConfigForLog(loadConfig(validEnv));
+
+    expect(snapshot['watchdogMqttDownMs']).toBe(120_000);
+    expect(snapshot['watchdogInboundStallMs']).toBe(60_000);
+  });
+});
+
 describe('redactUrl', () => {
   it('redacts user:password from a URL', () => {
     expect(redactUrl('redis://user:secret@redis:6379/0')).toBe('redis://***@redis:6379/0');
