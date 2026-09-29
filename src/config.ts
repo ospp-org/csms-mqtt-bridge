@@ -95,9 +95,9 @@ const envSchema = z.object({
   // clean:false it keeps the session — its PLAIN subscription and any QoS-1 messages
   // the broker queues for it — alive across a brief bridge disconnect (AUDIT-05 F-02;
   // see STATION_INBOUND_TOPIC in mqtt.ts for why the subscription is plain, not $share/).
-  // The spec value is 3600 (02-transport.md:35-49). positiveInt EXCLUDES 0 on purpose: a
-  // zero expiry IS part of the bug (session deleted on disconnect → station QoS-1 messages
-  // dropped mid-partition), so it can never be reintroduced by config.
+  // The spec value is 3600 (02-transport.md, section 1.2 Connection Parameters). positiveInt
+  // EXCLUDES 0 on purpose: a zero expiry IS part of the bug (session deleted on disconnect →
+  // station QoS-1 messages dropped mid-partition), so it can never be reintroduced by config.
   MQTT_SESSION_EXPIRY_INTERVAL: positiveInt.default(3600),
   REDIS_QUEUE_INCOMING: z.string().min(1).default('mqtt:incoming'),
   // Refuse to start when the queue Redis can EVICT the queue out from under us.

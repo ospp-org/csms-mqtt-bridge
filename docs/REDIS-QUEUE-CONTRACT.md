@@ -113,8 +113,8 @@ export interface IncomingEnvelope {
 - **`version`** (required) — `1`. See §1.
 - **`topic`** (required) — full topic string as observed by the bridge,
   matching the regex
-  `^ospp/v1/stations/stn_[a-f0-9]{8,60}/to-server$` (per
-  spec/spec/01-architecture.md:127). Topics that don't match are
+  `^ospp/v1/stations/stn_[a-f0-9]{8,60}/to-server$` (per the OSPP spec,
+  `01-architecture.md`, section 3.1 Identifier Format). Topics that don't match are
   dropped with a `warn` log; they NEVER reach this queue.
 - **`stationId`** (required) — extracted from `topic`. Always equal to
   the captured group, including the `stn_` prefix. Provided
@@ -219,8 +219,8 @@ than dropping it. The drop is logged at `warn`.
 
   Decode `payload`, read the OSPP `messageId` from the message, and key on
   `(stationId, osppMessageId)`. That value is stable across re-deliveries because
-  the station chose it. csms-server does this at
-  `MessageDispatcher.php:219` via `MessageFactory.php:109`, backed by
+  the station chose it. csms-server does this in `MessageDispatcher::dispatch()`
+  via `MessageFactory::fromJson()`, backed by
   `DeduplicationRegistry` (a DONE marker, an owned `SET NX EX` claim, and a
   cached response).
 

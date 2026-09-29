@@ -594,8 +594,8 @@ describe('startMqttClient — inbound (handleMessage manual ack)', () => {
   // per DELIVERY, so a broker re-delivery of the identical packet — the exact recovery
   // scenario the contract names — carries a different envelope messageId and would not
   // match. Deduplication belongs on the OSPP messageId inside the payload, which the
-  // bridge never touches. csms-server does exactly that (MessageDispatcher.php:219 via
-  // MessageFactory.php:109); the contract text was the only thing that was wrong.
+  // bridge never touches. csms-server does exactly that (MessageDispatcher::dispatch() via
+  // MessageFactory::fromJson()); the contract text was the only thing that was wrong.
   it('mints a NEW envelope messageId per delivery — so it can never be a dedupe key', async () => {
     const fakeClient = makeFakeClient();
     const fakeRedis = makeFakeRedis();

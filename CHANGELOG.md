@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries below put it at a line of `connect/tls.js`; it is `buildStream` in that file, where
   at mqtt.js 5.15.1, the pinned version, `opts.servername = opts.host` runs for every host
   that is not an IP literal, overwriting the `servername` the bridge passes.
+- `src/config.ts`, a comment in `src/__tests__/mqtt.test.ts` and `docs/REDIS-QUEUE-CONTRACT.md`
+  cite by name, not by line: the spec's `02-transport.md` section 1.2 Connection Parameters and
+  `01-architecture.md` section 3.1 Identifier Format, and csms-server's
+  `MessageDispatcher::dispatch()` and `MessageFactory::fromJson()`, whose deduplication
+  statements have since moved within their files.
 
 ### Internal
 
