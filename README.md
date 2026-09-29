@@ -320,7 +320,6 @@ global default), with `service="csms-mqtt-bridge"` as a default label.
 | `csms_bridge_queue_durability_violations_total{policy}` | counter | Startup checks that found `maxmemory-policy != noeviction`. Non-zero means messages can be evicted after being acked.     |
 | `csms_bridge_mqtt_connected`                            | gauge   | 1 when attached to the broker.                                                                                            |
 | `csms_bridge_redis_connected`                           | gauge   | 1 when Redis is ready. **0 means inbound is stalled** — pushes neither resolve nor reject, so nothing is acked.           |
-| `csms_bridge_inflight_outbound`                         | gauge   | Outbound publishes awaiting confirmation.                                                                                 |
 | `csms_bridge_reconnects_total`                          | gauge   | MQTT reconnect attempts since start.                                                                                      |
 | `csms_bridge_last_message_age_seconds`                  | gauge   | Seconds since the last inbound message; **-1** when none since start (not 0, which would read as "just arrived").         |
 
