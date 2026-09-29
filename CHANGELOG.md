@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`MqttConsume` reads `mqtt:incoming`); what the application sends goes through
   `MqttStationGateway` and `EmqxApiPublisher` to the EMQX REST API, as the Architecture
   section already said.
+- `src/health.ts`: the comment on `redisReady` no longer says "Both ioredis clients report
+  ready". `isReady()` has read one client since 0.2.0 removed the dedicated blocking one; the
+  comment was true when `/healthz` was written and went stale with that removal.
 
 ### Internal
 

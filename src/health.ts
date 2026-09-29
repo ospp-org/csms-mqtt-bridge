@@ -4,7 +4,7 @@ import { state } from './state.js';
 export interface HealthChecks {
   /** Attached to the broker — the CONNACK arrived and no close/offline since. */
   mqttConnected: boolean;
-  /** Both ioredis clients report ready, so the queue can actually be written. */
+  /** The ioredis client reports ready, so the queue can actually be written. */
   redisReady: boolean;
 }
 
