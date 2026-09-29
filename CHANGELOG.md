@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-29
+
+### Fixed
+
+- **The startup line no longer claims a durability the check did not find.** With
+  `REDIS_REQUIRE_NOEVICTION=false` and a queue Redis whose `maxmemory-policy` is not
+  `noeviction`, or cannot be read, the bridge logged its `[QUEUE_DURABILITY]` warning and
+  then `queue durability asserted (maxmemory-policy=noeviction)` - the opposite of the
+  warning just before it. That line is now logged only when the policy is `noeviction`;
+  otherwise a warn-level `queue durability NOT asserted (maxmemory-policy=<policy>)` names
+  the policy and the downgrade, and startup goes on as before. `assertQueueDurable()`
+  resolves with what it found (`{ durable, policy }`) instead of `undefined`, which both
+  branches used to resolve. The refusal itself, the warning and
+  `csms_bridge_queue_durability_violations_total` are unchanged.
+
+### Documentation
+
+- README: the `GET /metrics` table listed `csms_bridge_inflight_outbound`, which went with
+  the outbound path in 0.2.0 and which nothing registers. The row is removed, and a test
+  pins the table to the bridge registry both ways, on name, type and labels.
+- `src/bootstrap.ts` no longer says an outbound loop needs the Redis connection, and cites
+  the csms-server report on the startup order by its heading instead of by line range.
+
+### Internal
+
+- The release workflow's job times out after **20 minutes** instead of GitHub's default
+  360. The first v0.2.0 release attempt hung in the arm64 `npm ci` under QEMU
+  (`Illegal instruction`) and printed nothing for 58 minutes until it was cancelled by
+  hand; a release normally publishes in about 3.
+
 ## [0.2.0] - 2026-09-29
 
 ### Removed
@@ -319,7 +349,8 @@ that produces this image.
   `csms-uat-server-1`) — provisioning happens out-of-band via the
   `ospp:generate-server-cert` artisan command in csms-server (Phase 0.6).
 
-[Unreleased]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.7...v0.2.0
 [0.1.4]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.2...v0.1.3
