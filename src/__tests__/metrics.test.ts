@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import { buildInfo, classifyDropReason, register, setBuildInfo, topicDropsTotal } from '../metrics.js';
@@ -114,5 +117,39 @@ describe('bridge state gauges', () => {
     const match = /csms_bridge_last_message_age_seconds\{[^}]*\} (\d+)/.exec(rendered);
     expect(match).not.toBeNull();
     expect(Number(match?.[1])).toBeGreaterThanOrEqual(11);
+  });
+});
+
+// The README's `GET /metrics` table is what an operator reads to learn which series a
+// scrape returns, and it drifted: removing the outbound path took
+// csms_bridge_inflight_outbound out of the registry and left its row in the table. Pinned
+// both ways, on name, type and label names: a row with no metric behind it, and a metric
+// with no row. Every bridge metric is declared in src/metrics.ts, imported above.
+describe('README metrics table', () => {
+  const readmeRows = (): string[] => {
+    const readme = readFileSync(join(import.meta.dirname, '..', '..', 'README.md'), 'utf-8');
+    return readme.split('\n').flatMap((line) => {
+      const row = /^\| `(csms_bridge_[a-z_]+)(\{[^}]*\})?` +\| ([a-z]+) +\|/.exec(line);
+      return row ? [`${row[1] ?? ''}${row[2] ?? ''} ${row[3] ?? ''}`] : [];
+    });
+  };
+
+  // prom-client's typings omit labelNames and declare `type` as a numeric enum; at run
+  // time every metric carries its labelNames and a type string ('counter', 'gauge').
+  const registeredRows = (): string[] =>
+    register
+      .getMetricsAsArray()
+      .map((m) => m as unknown as { name: string; type: string; labelNames: readonly string[] })
+      .filter((m) => m.name.startsWith('csms_bridge_'))
+      .map((m) => {
+        const labels = m.labelNames.length > 0 ? `{${m.labelNames.join(',')}}` : '';
+        return `${m.name}${labels} ${m.type}`;
+      });
+
+  it('lists exactly the csms_bridge_* metrics the registry exposes, with their type and labels', () => {
+    const registered = registeredRows();
+    // The denominator first: two empty lists are equal, and that would prove nothing.
+    expect(registered.length).toBeGreaterThan(0);
+    expect(readmeRows().sort()).toEqual(registered.sort());
   });
 });
