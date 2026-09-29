@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-29
+
 ### Removed
 
 - **The Redis outbound path, in full** — the `BLMOVE` loop, `mqtt:processing`, the
@@ -23,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The inbound grant is read.** After each SUBSCRIBE the SUBACK is checked: a refusal
+  (a reason code with the `0x80` bit - `135` Not authorized is what an ACL deny answers)
+  or a grant below the QoS 1 asked is logged at `fatal` and the bridge exits **1**. It
+  used to log the refusal and run on subscribed to nothing, and to log a QoS 0 grant as
+  a success - at QoS 0 the broker queues nothing for the persistent session and waits
+  for no PUBACK, so the manual ack guarded nothing. A SUBSCRIBE cut off by a closing
+  connection is not a refusal. `startMqttClient` takes the connector and an `onFatal`
+  handler as required arguments.
+- **A stuck bridge exits** (`src/watchdog.ts`), so the container's restart policy
+  restarts it - a health check restarts nothing. Three conditions, each logged as
+  `bridge is stuck` with the condition before an exit **1**: `mqtt_down` (the broker
+  connection down past `WATCHDOG_MQTT_DOWN_MS`, default 120 s, a broker never reached
+  counting), `inbound_stalled` (one message in hand past `WATCHDOG_INBOUND_STALL_MS`,
+  default 60 s - a Redis push that never settles), and `unacked_pending` (a refused push
+  left unacknowledged past the same limit - the broker resends it only on a new
+  connection). A restart loses nothing: the session is persistent and nothing stuck was
+  acknowledged. Proven at process level by `watchdog.integration.test.ts`.
 - **`assertQueueDurable()`** — the bridge refuses to start when the queue Redis
   reports a `maxmemory-policy` other than `noeviction`. Under an eviction policy an
   `LPUSH` reports success, the bridge PUBACKs, the broker drops its copy, and Redis
@@ -50,6 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `messageId` inside the payload, which is what csms-server always used.
 - Stale mechanics across the contract, README and `package.json`: `$share/`
   subscription, `BLPOP`, `BRPOP`, "Horizon worker".
+
+## [0.1.4] - 2026-05-16
 
 ### Changed
 
@@ -298,7 +319,9 @@ that produces this image.
   `csms-uat-server-1`) — provisioning happens out-of-band via the
   `ospp:generate-server-cert` artisan command in csms-server (Phase 0.6).
 
-[Unreleased]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.7...v0.2.0
+[0.1.4]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ospp-org/csms-mqtt-bridge/compare/v0.1.0...v0.1.1
