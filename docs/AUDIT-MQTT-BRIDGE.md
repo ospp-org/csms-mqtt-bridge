@@ -30,7 +30,8 @@
    în tăcere. Sub `noeviction` aceeași probă respinge și nu se pierde nimic. (§2.3)
 3. **AUDIT-05 F-02 e VIU în stiva locală:** brokerul raportează sesiunea podului cu
    `session_expiry_interval=0`. Reparația e în arbore la `v0.1.7`; containerul rulează
-   **`0.1.5`** — fiindcă `docker-compose.yml:149` are `${BRIDGE_VERSION:-0.1.5}`, adică
+   **`0.1.5`** — fiindca `image:` din serviciul `mqtt-bridge` al `docker-compose.yml` are
+   `${BRIDGE_VERSION:-0.1.5}`, adica
    **implicitul e chiar build-ul defect**. Orice mediu care nu pinuiește explicit reia
    defectul. (§2.1, §1.5, §5.3)
 4. **Redis căzut nu aruncă și nu pierde — îngheață tot.** Măsurat: promisiunea nu se
@@ -54,7 +55,8 @@
 ### 1.1 Formă
 
 Un singur proces Node (6 fișiere sursă, 973 linii), o singură sesiune MQTT, **două**
-conexiuni ioredis (`redis.ts:167-182` — a doua e `duplicate()` dedicată lui `BLMOVE`).
+conexiuni ioredis (`createRedisBridge` din `redis.ts`: `redis` si `redisBlocking` — a doua e `duplicate()`
+dedicata lui `BLMOVE`).
 
 | fișier | linii | rol |
 | --- | --- | --- |
@@ -73,12 +75,14 @@ stație ──mTLS QoS1──▶ EMQX ──plain sub──▶ POD ──LPUSH�
 ```
 
 - Abonare **simplă (non-shared)** la `ospp/v1/stations/+/to-server`, QoS 1
-  (`src/mqtt.ts:41`, subscribe la `:328`). `$share/` a fost scos la `2ba00e8`.
-- `client.handleMessage` e **suprascris** (`src/mqtt.ts:378-398`): PUBACK-ul pleacă
+  (`STATION_INBOUND_TOPIC` din `src/mqtt.ts`; `client.subscribe` din handlerul `connect`).
+  `$share/` a fost scos la `2ba00e8`.
+- `client.handleMessage` e **suprascris** (`installManualAck` din `src/mqtt.ts`): PUBACK-ul pleaca
   spre broker **numai după** ce `LPUSH` s-a rezolvat. Acesta e ancora at-least-once.
 - `stationId` se extrage cu `^ospp/v1/stations/(stn_[a-f0-9]{8,60})/to-server$`
-  (`src/mqtt.ts:60`). Ce nu se potrivește → **ack + aruncare + contor** (`:134-153`).
-- Plicul: `LPUSH mqtt:incoming` (`src/redis.ts:206`). Payload-ul e base64 opac —
+  (`STATION_TOPIC_RE` din `src/mqtt.ts`). Ce nu se potriveste → **ack + aruncare + contor**
+  (ramura `stationId === null` din `handleInbound`).
+- Plicul: `LPUSH mqtt:incoming` (`pushIncoming` din `src/redis.ts`). Payload-ul e base64 opac —
   podul nu-l interpretează niciodată.
 
 **Măsurat pe stiva vie** (`redis-cli MONITOR`, 12 s, `csms-redis`):
@@ -91,29 +95,30 @@ stație ──mTLS QoS1──▶ EMQX ──plain sub──▶ POD ──LPUSH�
 
 Ambele capete: **aceeași instanță, `db0`, chei fără prefix Laravel**. Confirmat.
 
-Consumatorul: `app/Console/Commands/MqttConsume.php:221-236` — `BLMOVE incoming →
+Consumatorul: `MqttConsume::blockingMove()` din `app/Console/Commands/MqttConsume.php` — `BLMOVE incoming →
 pending RIGHT LEFT`, listă `pending` proprie per worker, `LREM` după succes
-(`:136`), replay la boot (`:358-397`), plus `IngressLeaseReaper` programat în
-fiecare minut (`routes/console.php:35`). Este un tipar de coadă fiabilă, cu
+(in `handle()`), replay la boot (`replayPending()` si `replayList()`), plus `IngressLeaseReaper` programat in
+fiecare minut (`Schedule::command('mqtt:reap-stale-ingress')->everyMinute()` din
+`routes/console.php`). Este un tipar de coada fiabila, cu
 autovindecare.
 
 ### 1.3 Calea de ieșire — mașinărie fără producător
 
 Podul face `BLMOVE mqtt:outgoing → mqtt:processing LEFT RIGHT`
-(`src/redis.ts:210-216`), publică, apoi `LREM` (`:190`).
+(`popOutgoingReliable` din `src/redis.ts`), publica, apoi `LREM` (`ackOf`).
 
 **Nimic nu scrie vreodată în `mqtt:outgoing`.** Verificat direct:
 
 ```
 grep -rn "mqtt:outgoing" app config database routes tests   →  0 rezultate
 toate rpush/lpush din app/:
-  MqttConsume.php:450    → queues['incoming']   (reîncercare soft-fail)
-  MqttConsume.php:479    → queues['dlq']
-  DeadLetterQueue.php:109→ incoming             (replay de operator)
+  MqttConsume::handleFailure()    → queues['incoming']   (reincercare soft-fail)
+  MqttConsume::moveToDlq()        → queues['dlq']
+  DeadLetterQueue::replayEntry()  → incoming             (replay de operator)
 ```
 
 Ieșirea reală: `EmqxApiPublisher` → `POST {base}/api/v5/publish`
-(`app/Shared/MQTT/EmqxApiPublisher.php:268`), prin `MqttStationGateway`.
+(`EmqxApiPublisher::doPublish()` din `app/Shared/MQTT/EmqxApiPublisher.php`), prin `MqttStationGateway`.
 
 Jumătatea de ieșire a fost construită la `a837492` („at-least-once … + BLMOVE
 outbound") și **nu a avut producător niciodată** — `git log -S "mqtt:outgoing"`
@@ -129,18 +134,22 @@ provocată tocmai de acest `BLMOVE`).
 
 - **Starea nu e citită.** `state.redisConnected`, `state.lastMessageReceivedAt`,
   `state.inflightOutbound` sunt scrise și **nu au niciun cititor** — grep-ul găsește
-  doar `state.reconnectCount` (într-un log, `mqtt.ts:346`) și `state.mqttConnected`
-  (o gardă, `mqtt.ts:418`). Nimic nu le expune ca metrică.
+  doar `state.reconnectCount` (intr-un log, handlerul `reconnect` din `mqtt.ts`) si `state.mqttConnected`
+  (o garda, `stop()` din `startMqttClient`, `mqtt.ts`). Nimic nu le expune ca metrica.
 - **`isReady()` nu are niciun apelant în producție** — doar teste
-  (`src/redis.ts:269`; apelanți: `redis.test.ts:236,239,574,578,582`).
-- **`/healthz` întoarce 200 necondiționat** (`src/index.ts:93-97`) — nu consultă
+  (`isReady()` din `src/redis.ts`; apelanti: testele `isReady() reflects status` si
+  `isReady() requires BOTH clients to be ready` din `redis.test.ts`).
+- **`/healthz` intoarce 200 neconditionat** (ramura `/healthz` din handlerul `metricsServer`,
+  `src/index.ts`) — nu consulta
   nici MQTT, nici Redis, nici starea. **Și nici nu e folosit nicăieri:** healthcheck-ul
-  containerului e `["CMD-SHELL", "kill -0 1"]` (`csms-server/docker-compose.yml:163-168`,
+  containerului e `["CMD-SHELL", "kill -0 1"]` (cheia `healthcheck` a serviciului `mqtt-bridge`
+  din `csms-server/docker-compose.yml`,
   confirmat pe containerul viu), neschimbat de niciun override, iar `Dockerfile` nu
   are `HEALTHCHECK`. „Healthy" înseamnă strict „PID 1 există".
-  (`docs/REPORT-SPRINT-FIX-ISSUES-POST-VALIDATION-20260522T140029Z.md:106` susține că
+  (`docs/REPORT-SPRINT-FIX-ISSUES-POST-VALIDATION-20260522T140029Z.md`, „Outstanding items
+  not in scope", punctul „Bridge Dockerfile health-check", sustine ca
   healthcheck-ul ar fi `wget … /healthz` — fals față de compose și față de container.)
-- Singura metrică proprie: `csms_bridge_topic_drops_total` (`src/metrics.ts:40`).
+- Singura metrica proprie: `csms_bridge_topic_drops_total` (`topicDropsTotal` din `src/metrics.ts`).
 
 ### 1.5 Unde rulează
 
@@ -148,30 +157,32 @@ Mecanismul de deploy e **Docker Compose și nimic altceva** — niciun manifest
 Kubernetes, nicio unitate systemd, nicio intrare supervisord nu referă podul
 nicăieri sub `~/dev/projects/`.
 
-| unitate | fișier:linie | `MQTT_CLIENT_ID` | broker |
+| unitate | fisier, bloc | `MQTT_CLIENT_ID` | broker |
 | --- | --- | --- | --- |
-| definiție de bază (profil `sidecar`) | `csms-server/docker-compose.yml:148-178` | — (vine din override) | — |
+| definitie de baza (profil `sidecar`) | `csms-server/docker-compose.yml`, serviciul `mqtt-bridge` | — (vine din override) | — |
 | local dev (override **netracked**) | `docker-compose.override.yml:32-59` | `csms-dev-server-1` | `mqtts://emqx:8883` |
-| UAT | `docker-compose.uat.yml:126-137` | `csms-uat-server-1` | `mqtts://mqtt-uat.onestoppay.ro:8883` |
-| PROD | `docker-compose.prod.yml:129-150` | `csms-prod-server-1` | `mqtts://mqtt.onestoppay.ro:8883` |
+| UAT | `docker-compose.uat.yml`, serviciul `mqtt-bridge` | `csms-uat-server-1` | `mqtts://mqtt-uat.onestoppay.ro:8883` |
+| PROD | `docker-compose.prod.yml`, serviciul `mqtt-bridge` | `csms-prod-server-1` | `mqtts://mqtt.onestoppay.ro:8883` |
 
 Limite: 100 MB / 0,2 CPU, `restart: unless-stopped` moștenit în **toate** mediile
-(`docs/SIDECAR-DEPLOYMENT.md:281` susține că „Prod folosește `always`" — **fals**,
+(`docs/SIDECAR-DEPLOYMENT.md`, „Operational Notes", „Restart policy", sustine ca „Prod foloseste `always`" — **fals**,
 `docker-compose.prod.yml` nu setează niciun `restart:`; containerul viu confirmă
 `unless-stopped`).
 
 Ambele scripturi de deploy îl pornesc necondiționat și abandonează deploy-ul dacă
-eșuează (`scripts/deploy-uat.sh:487-496`, `scripts/deploy-prod.sh:277-284`).
+esueaza (pasii „Starting csms-mqtt-bridge sidecar..." si „Restarting sidecar to load fresh cert..."
+din `scripts/deploy-uat.sh` si `scripts/deploy-prod.sh`).
 Lanțul de release e real: tag `v*.*.*` → GHCR multi-arch cu provenance+sbom
-(`.github/workflows/release.yml:13-16,73-85`); toate tag-urile `v0.1.0`…`v0.1.7`
+(`.github/workflows/release.yml`: triggerul `on.push.tags` `v*.*.*` si pasul
+`Build and push image` cu `provenance` si `sbom`); toate tag-urile `v0.1.0`…`v0.1.7`
 există pe `origin`.
 
 **Cauza rădăcină a §2.1 e aici — versiunea implicită e build-ul stricat:**
 
 ```
-docker-compose.yml:149    ghcr.io/ospp-org/csms-mqtt-bridge:${BRIDGE_VERSION:-0.1.5}
-.env.example:114          BRIDGE_VERSION=0.1.4
-reparația F-02            v0.1.7  = 2ba00e8 = HEAD
+docker-compose.yml, mqtt-bridge: image   ghcr.io/ospp-org/csms-mqtt-bridge:${BRIDGE_VERSION:-0.1.5}
+.env.example, BRIDGE_VERSION             BRIDGE_VERSION=0.1.4
+reparatia F-02                           v0.1.7  = 2ba00e8 = HEAD
 ```
 
 `v0.1.5` e exact build-ul defect: `git show v0.1.5:src/mqtt.ts` folosește
@@ -179,22 +190,26 @@ reparația F-02            v0.1.7  = 2ba00e8 = HEAD
 `MQTT_SESSION_EXPIRY_INTERVAL` — ambele jumătăți ale F-02. Orice mediu care nu
 pinuiește explicit `BRIDGE_VERSION` **reia defectul**. Stiva locală rulează `0.1.5`
 chiar acum. Spus deja în arbore, la
-`csms-server/docs/INTEGRATOR-HANDOFF-PROVISIONING-BOOT.md:1121`.
+`csms-server/docs/INTEGRATOR-HANDOFF-PROVISIONING-BOOT.md`, „5.4 Things that will be broken on the
+wire when you look", randul „The shared-subscription offline drop is fixed in bridge 0.1.7, but the
+repo default still points at the broken 0.1.5 build".
 
 Colateral: `CHANGELOG.md` al podului are titluri doar până la `## [0.1.3]` —
 release-urile 0.1.4…0.1.7 sunt tăgăduite și publicate **fără nicio intrare**.
 
 Al doilea defect de deploy: rețeta money-e2e
-(`docker-compose.money-e2e.yml:14-17`, `tools/bt-ipay-double/README.md:48-50`) trece
+(`docker-compose.money-e2e.yml`, comentariul de utilizare, pasul „Bring the stack up WITH the
+sidecar profile"; `tools/bt-ipay-double/README.md`, sectiunea „Wire into the full stack") trece
 `-f` explicit, ceea ce suprimă încărcarea automată a `docker-compose.override.yml`;
 `docker-compose.dev.yml` nu are serviciul `mqtt-bridge`; iar baza nu furnizează
 niciuna dintre cele cinci variabile obligatorii. Rețeta documentată pornește deci
-un pod care **pică pe validarea zod și iese cu 1** (`src/config.ts:56-62,123-129`).
+un pod care **pica pe validarea zod si iese cu 1** (cheile obligatorii din `envSchema` si
+`loadConfig`, `src/config.ts`).
 
 ### 1.6 Rendez-vous-ul Redis — aliniat pe o singură coordonată
 
 Podul își ia ținta din `REDIS_URL`; consumatorul, din conexiunea `mqtt`
-(`config/database.php:221-229`). Comparate coordonată cu coordonată:
+(cheia `redis.mqtt` din `config/database.php`). Comparate coordonata cu coordonata:
 
 | coordonată | pod (compose) | Laravel `mqtt` | divergă când |
 | --- | --- | --- | --- |
@@ -204,14 +219,14 @@ Podul își ia ținta din `REDIS_URL`; consumatorul, din conexiunea `mqtt`
 | parolă | **doar `${REDIS_PASSWORD}`** | `env('REDIS_MQTT_PASSWORD', env('REDIS_PASSWORD'))` | operatorul setează `REDIS_MQTT_PASSWORD` |
 
 Ambele axe divergente sunt **invitate activ** de fișierul-exemplu livrat:
-`.env.prod.example:83` oferă `# REDIS_MQTT_DB=0`, iar `:84` oferă
-`# REDIS_MQTT_PASSWORD=GENERATED_BY_SCRIPT`. Cazul parolei e cel mai ascuțit:
+`.env.prod.example` (blocul „Dedicated MQTT-queue Redis") ofera `# REDIS_MQTT_DB=0`, iar in acelasi bloc
+ofera `# REDIS_MQTT_PASSWORD=GENERATED_BY_SCRIPT`. Cazul parolei e cel mai ascutit:
 serverul `redis-queue` chiar onorează `REDIS_MQTT_PASSWORD`
-(`docker-compose.yml:132`), deci setarea ei face coada să ceară o parolă pe care
+(cheia `command` din `docker-compose.yml`), deci setarea ei face coada sa ceara o parola pe care
 podul n-o trimite niciodată. Iar `GENERATED_BY_SCRIPT` e o promisiune goală —
 `grep REDIS_MQTT` peste `scripts/generate-prod-credentials.sh` și
 `generate-uat-credentials.sh` nu întoarce nimic, iar `preflight-env-enums.sh`
-nu verifică niciuna. `.env.prod.example:79` numește simptomul, dar doar pentru
+nu verifica niciuna. `.env.prod.example`, in acelasi bloc, numeste simptomul, dar doar pentru
 gazdă: *„Miss (3) and the worker BRPOPs an empty queue while the bridge fills an orphan."*
 
 ---
@@ -238,8 +253,9 @@ iar `MQTT_SESSION_EXPIRY_INTERVAL` a apărut în `0.1.6` (`e0b25d5`), urmat de
 fix-forward-ul din `0.1.7` (`2ba00e8`).
 
 **La HEAD** (`v0.1.7`) comportamentul e cel corect: `sessionExpiryInterval: 3600`
-(`src/config.ts:94`, `src/mqtt.ts:95`), abonament simplu, iar `stop()` **nu**
-dezabonează deliberat (`src/mqtt.ts:419-426`) — brokerul păstrează coada și o
+(`MQTT_SESSION_EXPIRY_INTERVAL` din `src/config.ts`, `buildClientOptions` din
+`src/mqtt.ts`), abonament simplu, iar `stop()` **nu**
+dezaboneaza deliberat (`stop()` din `startMqttClient`, `src/mqtt.ts`) — brokerul pastreaza coada si o
 redă la reconectare.
 
 Plafonul acelei cozi e al brokerului, nu al podului: `max_mqueue_len = 1000`
@@ -260,7 +276,8 @@ t+13.7 redis ready
 t+15.5 resolved=500 rejected=0  LLEN=500                 ← nimic pierdut
 ```
 
-Cauza: `maxRetriesPerRequest: null` (`src/redis.ts:171`) plus coada offline
+Cauza: `maxRetriesPerRequest: null` (optiunile clientului din `createRedisBridge`,
+`src/redis.ts`) plus coada offline
 implicită a ioredis. Comanda nu eșuează niciodată — așteaptă la nesfârșit.
 (Prima mea probă a raportat `LLEN=0` după repornire; era doar backoff, nu pierdere.
 Corectat prin re-măsurare cu jurnalizarea evenimentelor de ciclu de viață.)
@@ -268,19 +285,21 @@ Corectat prin re-măsurare cu jurnalizarea evenimentelor de ciclu de viață.)
 **Consecința gravă nu e pierderea, ci blocajul total.** mqtt.js pompează pachetele
 de intrare **strict unul câte unul**: `work()` scoate un singur pachet și avansează
 doar prin `nextTickWork`, după ce callback-ul handler-ului curent a fost apelat
-(`node_modules/mqtt/build/lib/client.js:262-296`; pentru QoS 1, PUBACK-ul e legat
-de acel callback la `handlers/publish.js:87-92`). Un singur `LPUSH` blocat ⇒
+(`node_modules/mqtt/build/lib/client.js`, `work`, `nextTickWork` si `writable._write` din
+`MqttClient#connect`, mqtt 5.15.1; pentru QoS 1, PUBACK-ul e legat
+de acel callback in `handlePublish` din `handlers/publish.js`, apelul
+`client.handleMessage`). Un singur `LPUSH` blocat ⇒
 **nicio stație nu mai e ingerată**, iar contrapresiunea urcă până în socket.
 
 Ce vede lumea din afară în acest timp: containerul e `healthy` (fiindcă PID 1
 trăiește — §1.4), `/healthz` ar răspunde `ok` dacă l-ar întreba cineva, `up` → 1,
 niciun contor nu se mișcă. **Nu există alertă `up{job=...}` nicăieri** în
 `docker/prometheus/rules/alerts.yml`.
-Singura alertă a podului, `BridgeSilentTopicDropsDetected` (`alerts.yml:506`), se
+Singura alerta a podului, `BridgeSilentTopicDropsDetected` (`expr` din `alerts.yml`), se
 declanșează doar când podul **funcționează** și aruncă.
 
 Recuperarea e automată, dar întârziată de backoff-ul exponențial propriu
-(`src/redis.ts:118-122`). Din funcția exportată de repo:
+(`retryStrategy` din `src/redis.ts`). Din functia exportata de repo:
 
 | încercare | 7 | 8 | 9 | 10 | 11 |
 | --- | --- | --- | --- | --- | --- |
@@ -310,18 +329,20 @@ Politica măsurată acum pe `csms-redis`: `maxmemory 268435456`, `maxmemory-poli
 allkeys-lru`, `appendonly yes`, folosit 8,16 MB din 256 MB.
 
 Garda există — dar pe cititor, nu pe scriitor: `MqttConsume::assertQueueRedisDurable()`
-(`app/Console/Commands/MqttConsume.php:173-198`) aruncă fatal în `production|staging|uat`
+(`app/Console/Commands/MqttConsume.php`) arunca fatal in `production|staging|uat`
 dacă politica nu e `noeviction`, și doar avertizează în local. **Podul — cel care
 scrie — nu are niciun echivalent**: `grep -riE "maxmemory|noeviction" src/` → 0.
 
 Instanța dedicată corectă *există și rulează*: `csms-redis-queue`, măsurată
 `noeviction`, 256 MB, AOF — și e **complet goală**, cu keyspace vid. Activarea e o
 poartă de deploy cunoscută și încă netrecută, descrisă chiar în compose
-(`docker-compose.yml:118-122`): „*enable this profile + set `REDIS_MQTT_HOST=redis-queue`
+(`docker-compose.yml`, comentariul „ACTIVATION" de deasupra
+serviciului `redis-queue`): „*enable this profile + set `REDIS_MQTT_HOST=redis-queue`
 … AND repoint the bridge's `REDIS_URL` … the bridge WRITES the queue, so both the
 reader and the writer must rendezvous on this instance*".
 
-Contractul semnalase riscul în proză (`docs/REDIS-QUEUE-CONTRACT.md:64-69`, „*items
+Contractul semnalase riscul in proza (`docs/REDIS-QUEUE-CONTRACT.md`, sectiunea „2.1. Redis server
+requirements", punctul **Memory policy**, „*items
 COULD be evicted*"). Măsurătoarea arată că **se evacuează**, că pierderea e tăcută
 și că nimic nu o numără.
 
@@ -329,14 +350,15 @@ COULD be evicted*"). Măsurătoarea arată că **se evacuează**, că pierderea 
 
 | caz | ce face podul | unde |
 | --- | --- | --- |
-| topic care nu se potrivește regex-ului | **ack + aruncare** + `topicDropsTotal.inc()` + log `warn` | `mqtt.ts:134-153` |
-| payload corupt / non-OSPP | **trece nevăzut** — podul nu parsează niciodată payload-ul | `mqtt.ts:162` |
-| plic de ieșire invalid | `LREM` din processing + re-aruncare + log | `redis.ts:220-227` |
+| topic care nu se potriveste regex-ului | **ack + aruncare** + `topicDropsTotal.inc()` + log `warn` | `handleInbound` din `mqtt.ts` |
+| payload corupt / non-OSPP | **trece nevazut** — podul nu parseaza niciodata payload-ul | `handleInbound` din `mqtt.ts`, campul `payload` al plicului |
+| plic de iesire invalid | `LREM` din processing + re-aruncare + log | `popOutgoingReliable` din `redis.ts` |
 
 Podul **nu are coadă de erori proprie**. DLQ-ul real e al serverului
-(`mqtt:incoming-dlq`, `MqttConsume.php:479`), cu unelte de operator
+(`mqtt:incoming-dlq`, `MqttConsume::moveToDlq()`), cu unelte de operator
 (`mqtt:dlq:list|inspect|replay|purge`) și alertă pe adâncime
-(`alerts.yml:555`, `csms_mqtt_queue_depth{queue="dlq"} > 0`). Un payload stricat
+(alerta `MqttDlqBacklog` din `alerts.yml`,
+`csms_mqtt_queue_depth{queue="dlq"} > 0`). Un payload stricat
 ajunge deci în DLQ — dar **numai dacă topicul a fost bun**. Dacă topicul e greșit,
 mesajul moare la pod, iar DLQ-ul nu-l vede niciodată.
 
@@ -349,34 +371,39 @@ event=topic_dropped topic=ospp/v1/stations/stn_s2_sweep/to-server
 
 161 de mesaje aruncate față de `delivered_msgs=592` la broker — **27% din tot ce a
 livrat brokerul**. `stn_s2_sweep` nu e hex, deci cade pe `stn_[a-f0-9]{8,60}`.
-Acest drum e însă **numărat, jurnalizat și alertat** (`alerts.yml:505-514`,
+Acest drum e insa **numarat, jurnalizat si alertat** (alerta `BridgeSilentTopicDropsDetected`
+din `alerts.yml`,
 `increase(...[5m]) > 5`) — e singura cale de eșec a podului care are instrument complet.
 
 ### 2.5 Duplicat — contractul prescrie un mecanism care nu poate funcționa
 
 `messageId` din plic e **un UUID v4 proaspăt, generat la fiecare primire**
-(`src/mqtt.ts:165`). O redare a aceluiași pachet de către broker produce deci un
+(`messageId: randomUUID()` din `handleInbound`, `src/mqtt.ts`). O redare a aceluiasi pachet
+de catre broker produce deci un
 `messageId` **diferit**.
 
 Contractul cere explicit consumatorului să deduplice pe exact acel câmp:
 
-> `docs/REDIS-QUEUE-CONTRACT.md:251-256` — „*Idempotency: dedupe processed inbound
+> `docs/REDIS-QUEUE-CONTRACT.md`, „5. Reliability semantics", „Worker requirements" —
+> „*Idempotency: dedupe processed inbound
 > messages by `messageId`. After a Redis or bridge restart, an envelope … may appear
 > again if the broker re-delivers*"
-> `:270-272` — „*Treat `messageId` as the dedupe key.*"
+> acelasi document, „6. Compatibility checklist for the csms-server worker (Phase 0.8)" —
+> „*Treat `messageId` as the dedupe key.*"
 
 Scenariul pe care contractul îl numește (redare după repornire) este **exact** cel în
 care cheia lui nu poate potrivi. Dacă serverul ar fi urmat contractul, fiecare redare
 ar fi fost procesată de două ori.
 
 **Serverul nu-l urmează, și de aceea sistemul e sigur.** Deduplicarea reală cade pe
-`messageId`-ul OSPP **din interiorul** payload-ului decodat: `MqttConsume.php:262`
-decodează, `:285` trimite doar `$rawMessage` dispecerului,
-`MessageFactory.php:109` citește `$data['messageId']`, iar `MessageDispatcher.php:219`
-îl folosește drept cheie. Registrul (`DeduplicationRegistry.php:277,282,292`) ține
+`messageId`-ul OSPP **din interiorul** payload-ului decodat: `MqttConsume::processEnvelope()`
+decodeaza (`base64_decode`) si trimite doar `$rawMessage` dispecerului,
+`MessageFactory::fromJson()` citeste `$data['messageId']`, iar `MessageDispatcher::dispatch()`
+il foloseste drept cheie. Registrul (`DeduplicationRegistry`: `key()`, `claimKey()`, `responseKey()`) tine
 un marcaj DONE (ZSET, TTL 3600 s), o revendicare `SET NX EX` (90 s) și un răspuns
 în cache (7200 s). Serverul își documentează chiar distincția la
-`MqttConsume.php:270-280` („*Same OSPP message re-delivered by the broker has
+`MqttConsume::processEnvelope()`, comentariul de deasupra lui `Log::shareContext()`
+(„*Same OSPP message re-delivered by the broker has
 different envelope_ids but the same message_id*").
 
 **Concluzie: codul e corect, contractul e greșit.** Riscul e că un consumator viitor
@@ -391,9 +418,10 @@ podul: LPUSH A, LPUSH B, LPUSH C   →  listă L..R:  C B A
 consumatorul: BLMOVE ... RIGHT     →  scoate:      A B C     ✓ ordinea de pe fir
 ```
 
-Perechea `LPUSH` (pod, `redis.ts:206`) ↔ `BLMOVE … RIGHT` (consumator,
-`MqttConsume.php:221-236`) este **FIFO corect**, în ciuda faptului că
-contractul prescrie `BRPOP` (`REDIS-QUEUE-CONTRACT.md:39,267`) — o formulare stale,
+Perechea `LPUSH` (pod, `pushIncoming` din `redis.ts`) ↔ `BLMOVE … RIGHT` (consumator,
+`MqttConsume::blockingMove()`) este **FIFO corect**, in ciuda faptului ca
+contractul prescrie `BRPOP` (`REDIS-QUEUE-CONTRACT.md`, tabelul „2. Queue keys" si
+lista „6. Compatibility checklist") — o formulare stale,
 dar cu aceeași direcție, deci inofensivă.
 
 Un al doilea rezultat, în afara podului dar pe suprafața lui de contract:
@@ -403,17 +431,19 @@ listă L..R: D C B A ; consumatorul scoate A; A eșuează soft; RPUSH A
 listă L..R: D C B A ; următoarele scoateri:  A B C D
 ```
 
-O reîncercare `RPUSH` (`MqttConsume.php:450`) aterizează **la capătul din care
+O reincercare `RPUSH` (`MqttConsume::handleFailure()`) aterizeaza **la capatul din care
 consumatorul scoate** — deci `A` revine **imediat, înaintea lui B, C, D**. Ordinea
 de pe fir se **păstrează**; nu există inversare.
 
 Două comentarii din `csms-server` descriu invers acest mecanism —
-`app/Modules/Session/Handlers/SessionEndedHandler.php:100-103` și
-`tests/Integration/.../StopOrderInversionTest.php:50-54` susțin că plicul ajunge
+comentariul „And the order is not ours to rely on" din `SessionEndedHandler::handle()`
+(`app/Modules/Session/Handlers/SessionEndedHandler.php`) si
+paragraful „THE INVERSION IS NOT HYPOTHETICAL" din comentariul de antet al
+`tests/Integration/Modules/Session/Handlers/StopOrderInversionTest.php` sustin ca plicul ajunge
 „*behind the EVENT that followed it on the wire*". Măsurătoarea spune contrariul.
 **Nu am atins acele fișiere** (alt repo, altă sesiune scrie acolo) — le semnalez ca
 premisă de verificat acolo. Consecința reală nu e inversarea, ci **blocarea capului
-de coadă**: `MqttConsume.php:443-448` face `sleep(2|4|8)` sincron *înainte* de
+de coada**: `MqttConsume::handleFailure()` face `sleep(2|4|8)` sincron *inainte* de
 re-împingere, iar mesajul revine primul — deci un plic care eșuează soft ține toată
 ingestia până la ~14 s, apoi trece în DLQ.
 
@@ -423,7 +453,10 @@ ingestia până la ~14 s, apoi trece în DLQ.
 
 ### 3.1 Flota reală
 
-**4 stații în producție**, 4 în UAT (`csms-server/docs/KNOWN-ISSUES.md:1023,3578,3579`).
+**4 statii in productie**, 4 in UAT (`csms-server/docs/KNOWN-ISSUES.md`, intrarile „OPEN — the dedup
+marker OUTLIVES its own cached response, so §3.3 idempotent replay silently stops working after one
+hour" si, de doua ori, „Server-minted `bay_id` values a station can never report — LATENT, never
+fired").
 Volumul măsurat acolo: **2794 mesaje de intrare / 28 zile / 4 stații** ≈ 100 pe zi
 ≈ **0,0012 msg/s**. (Cifră din document, nu măsurată de mine — nu am acces la PROD.)
 
@@ -433,19 +466,23 @@ Podul nu e limita. Prima barieră e EMQX, iar ea vine **înaintea** setării car
 trebui s-o guverneze:
 
 - `max_connections` e lăsat `infinity`, ceea ce esockd rezolvă la `min(ulimit -Sn,
-  process_limit)` = **1024** (`csms-server/docker/emqx/emqx.conf.production:127-135`).
+  process_limit)` = **1024** (`csms-server/docker/emqx/emqx.conf.production`,
+  blocul „max_connections: LEFT AT `infinity`, WHICH RESOLVES TO 1024").
 - **Verificat pe viu:** `emqx ctl listeners` → `max_conns : 1024`; `ulimit -n` în
   container → **1024**.
 - `ulimits: nofile:` **nu apare în niciun fișier compose** — deci UAT și PROD au
   același 1024.
 - beam.smp consumă ~45 descriptori, rămân **~979 pentru conexiuni**
-  (`emqx.conf.production:150`). Tabelul de acolo (`:152-157`): 1 conexiune/stație →
+  (`emqx.conf.production`, blocul „PLANNING CONSTRAINT").
+  Tabelul de acolo (`connections per station | max fleet`): 1 conexiune/statie →
   ~979 stații; 2 → ~489; 3 → ~326; **5 (takeover + handshake eșuat + LWT) → ~195**.
 - Modul de eșec e cel urât: **EMFILE lovește la ~979 înainte ca `max_connections=1024`
-  să apuce să refuze curat** (`:162-167`) — refuzul `{error,maxlimit}` e
+  sa apuce sa refuze curat** (punctul „EMQX reaches EMFILE at ~979 connections" din „Two consequences worth
+  stating plainly") — refuzul `{error,maxlimit}` e
   neconstructibil, iar acceptorul intră în cicluri de suspendare de 1 s în timp ce
   rotația de log, CRL-ul și mnesia încep să pice.
-- `emqx.conf.production:173-176` notează chiar acolo că nicio regulă din
+- Paragraful „Nothing fires before any of this" din acelasi bloc al `emqx.conf.production`
+  noteaza chiar acolo ca nicio regula din
   `alerts.yml` nu referă vreo metrică `emqx_*`. Confirmat: **zero** referințe.
   **Plafonul e invizibil până când mușcă.**
 
@@ -465,7 +502,7 @@ față de 4 stații.**
 | `max_conns` / listener | **1024** (curent 20) | vezi §3.2 — EMFILE lovește primul |
 | `keepalive` | 30 s × 1,5 | brokerul declară sesiunea moartă după **45 s** |
 | `session_expiry_interval` | **0** viu / 3600 la HEAD | §2.1 |
-| memorie pod | limită **100 MB**, măsurat **22,27 MiB** (22%) | podul nu ține stare per stație — `state.ts:9-15` sunt cinci scalari — deci amprenta e per mesaj, nu proporțională cu flota |
+| memorie pod | limita **100 MB**, masurat **22,27 MiB** (22%) | podul nu tine stare per statie — `state` din `state.ts` are cinci scalari — deci amprenta e per mesaj, nu proportionala cu flota |
 | Redis `maxmemory` | 256 MB, `allkeys-lru` | §2.3 |
 
 **Redis nu e strangularea.** Măsurat cu codul real, secvențial, așa cum îl rulează
@@ -483,7 +520,8 @@ rețeaua de containere adaugă latență — e o limită superioară optimistă.
 3. **La presiune de memorie pe Redis** — evacuare tăcută (§2.3).
 4. **La ~195 de stații** — EMFILE pe broker, fără alertă (§3.2).
 5. **Un singur pod.** `mqtt:processing` e singleton, declarat „single-instance scope"
-   (`src/config.ts:97-101`). Trei încuietori independente împiedică azi un al doilea:
+   (cheia `REDIS_QUEUE_PROCESSING` din `envSchema`, `src/config.ts`).
+   Trei incuietori independente impiedica azi un al doilea:
    `container_name` fix în fiecare override, `MQTT_CLIENT_ID` fix (două containere
    ar intra în buclă de takeover), și absența oricărui `replicas:`. ACL-ul EMQX **nu**
    e o încuietoare — e pe prefix (`^csms\-prod\-`), deci un `csms-prod-server-2` ar
@@ -494,7 +532,8 @@ rețeaua de containere adaugă latență — e o limită superioară optimistă.
 
 **Suita: 164 de teste, 4 fișiere, verzi în 2,46 s** (`npm run test`, măsurat, nu moștenit).
 **CI există și rulează** — `lint → typecheck → test → build → verify dist`, pe `push`
-la `main` și pe fiecare PR (`.github/workflows/ci.yml:37-50`). Nu e un repo cu teste
+la `main` si pe fiecare PR (pasii `Lint`, `Typecheck`, `Test`, `Build` si `Verify build output`
+din `.github/workflows/ci.yml`). Nu e un repo cu teste
 care nu rulează nicăieri.
 
 ### Unde stau cele 164
@@ -514,13 +553,13 @@ al fiecărei stații are **39 de teste**.
 
 | proba | pică dacă |
 | --- | --- |
-| `pushes envelope to redis AND acks` (`mqtt.test.ts:508`) | ack-ul se trimite fără LPUSH, sau plicul își schimbă forma |
-| `does NOT ack … when redis push fails` (`:534`) | handler-ul înghite eroarea și confirmă |
-| `acks … on invalid topic` (`:549`) | podul ar reține gunoiul și l-ar reda la infinit |
-| `subscribes to the PLAIN … topic (not $share/)` (`:431`) | cineva reintroduce `$share/` — regresia F-02 |
-| `does NOT unsubscribe on stop` (`:800`) | `stop()` dezabonează → sesiunea pierde abonamentul |
-| `advertises the session-persistence CONNECT knobs` (`:311`) | `sessionExpiryInterval` sau `clean:false` dispar |
-| `LPUSH resolves while BLMOVE is still pending` (`redis.test.ts:452`) | s-ar reveni la un singur client ioredis |
+| `pushes envelope to redis AND acks` (`mqtt.test.ts`) | ack-ul se trimite fara LPUSH, sau plicul isi schimba forma |
+| `does NOT ack … when redis push fails` | handler-ul inghite eroarea si confirma |
+| `acks … on invalid topic` | podul ar retine gunoiul si l-ar reda la infinit |
+| `subscribes to the PLAIN … topic (not $share/)` | cineva reintroduce `$share/` — regresia F-02 |
+| `does NOT unsubscribe on stop` | `stop()` dezaboneaza → sesiunea pierde abonamentul |
+| `advertises the session-persistence CONNECT knobs` | `sessionExpiryInterval` sau `clean:false` dispar |
+| `LPUSH resolves while BLMOVE is still pending` (`redis.test.ts`) | s-ar reveni la un singur client ioredis |
 | `parseOutgoingEnvelope — version` (×4) | s-ar accepta un plic de versiune necunoscută |
 | `positiveInt` pe `MQTT_SESSION_EXPIRY_INTERVAL` | `0` ar redeveni configurabil (bug-ul F-02 prin config) |
 
@@ -532,7 +571,7 @@ al fiecărei stații are **39 de teste**.
 2. **`src/index.ts` nu are niciun test.** Deci: ordinea de pornire, oprirea grațioasă,
    `/healthz`, `/metrics`, tratarea semnalelor, `process.exit` — **nimic** nu e acoperit.
 3. **`does NOT ack … when redis push fails` testează o cădere care nu se produce.**
-   Testul mochează `pushIncoming` cu `Promise.reject` (`mqtt.test.ts:537`). Am măsurat
+   Testul mocheaza `pushIncoming` cu `Promise.reject` (in acel test din `mqtt.test.ts`). Am masurat
    (§2.2) că un Redis căzut **nu respinge niciodată** — promisiunea rămâne suspendată.
    Calea de respingere e reală, dar se atinge prin *erori de răspuns* (OOM, WRONGTYPE,
    auth), nu prin pierderea conexiunii. Testul demonstrează traducerea eroare→no-ack;
@@ -545,13 +584,15 @@ al fiecărei stații are **39 de teste**.
    Podul nu are nicio probă pe subiect.
 6. **`--passWithNoTests`** (`package.json`) — o rulare care nu colectează nimic iese
    verde. Un import stricat care golește colectarea trece CI-ul.
-7. **Suita de fir a serverului OCOLEȘTE podul.** `tests/MqttIntegration/MqttMoneyTestCase.php:126-160`
+7. **Suita de fir a serverului OCOLESTE podul.** `MqttMoneyTestCase::connectServerConsumer()`
+   din `tests/MqttIntegration/MqttMoneyTestCase.php`
    își face propriul client mTLS și se abonează direct la broker, apoi cheamă
-   `MessageDispatcher` în proces (`:183-225`) — o reimplementare a
+   `MessageDispatcher` in proces (`MqttMoneyTestCase::pumpWire()`) — o reimplementare a
    `MqttConsume::handleEnvelope`, nu consumatorul real. Deci **podul nu e în cale**.
    Mai rău: când rulează, consumatorul real concurează cu harnașamentul pe același
    filtru de topic — măsurat în arbore, **2/39 pică**, iar cu `docker stop
-   csms-mqtt-consumer` **39/39 trec** (`MqttIntegrationTestCase.php:60-77`). Direcția
+   csms-mqtt-consumer` **39/39 trec** (comentariul clasei `MqttIntegrationTestCase`, paragraful „ANOTHER PROCESS CAN
+   DECIDE THESE TESTS, AND ON THE DEV STACK IT DOES."). Directia
    periculoasă e trecerea, cum s-a stabilit deja.
    **Niciun test, nicăieri, nu pune un pod real să scrie un plic real pe care un
    `mqtt:consume` real să-l citească.**
@@ -562,12 +603,16 @@ al fiecărei stații are **39 de teste**.
 
 ### 5.1 „Baze Redis diferite între scriitor și cititor" — ÎNCHIS, verificat azi
 
-Incidentul e real și e consemnat: `AUDIT-UAT-PROD-MIRROR.md:311-315` descrie workerul
+Incidentul e real si e consemnat: `AUDIT-UAT-PROD-MIRROR.md` din `csms-server`, „Lesson 8 — Laravel Redis
+facade prefix vs raw sidecar keys" (din „Lessons Learned — Phase 0.7b cycle"), descrie workerul
 UAT citind `csms_api_uat_database_mqtt:incoming` și golind nimic — **prefixul Laravel**,
 nu indexul bazei, era mecanismul. Reparat prin commit `800ed13`.
 
 Reparația de azi: conexiunea Redis dedicată `mqtt` cu `'prefix' => ''` explicit
-(`config/database.php:221-229`), pinuită de `tests/Feature/Config/MqttQueueConnectionTest.php:43,68,77`.
+(cheia `redis.mqtt` din `config/database.php`), pinuita de testele din
+`tests/Feature/Config/MqttQueueConnectionTest.php`: „the mqtt queue connection routes to REDIS_MQTT_* when the
+dedicated instance is provisioned", „the mqtt queue url does NOT inherit the shared REDIS_URL (NEW-P3: else it
+neuters the dedicated-instance flip)" si „the mqtt queue connection is an isolated, raw-keyed connection".
 
 **Verificat pe viu, nu preluat:** `MONITOR` arată ambele capete pe `csms-redis`,
 `db0`, chei brute `mqtt:incoming` / `mqtt:outgoing`, fără prefix. **Defectul nu mai e
@@ -575,7 +620,7 @@ prezent.**
 
 Ce rămâne din el: garda e **într-un singur sens**. Podul își ia ținta din `REDIS_URL`,
 consumatorul din `REDIS_MQTT_*`; **nimic nu compară cele două**. Iar
-`.env.example:129` din `csms-server` livrează un `# MQTT_WORKER_REDIS_CONNECTION=default`
+`.env.example` din `csms-server` livreaza un `# MQTT_WORKER_REDIS_CONNECTION=default`
 comentat — decomentat, repointează workerul pe conexiunea *cu prefix* și recreează
 exact eșecul. Migrarea planificată spre `redis-queue` (§2.3) mută ambele capete și
 va trebui făcută **simultan**, altfel reproduce incidentul.
@@ -589,8 +634,10 @@ Nu există grupuri de consum, fiindcă **nu există Redis Streams**. Zero
 
 Nu am găsit nicio dovadă că o implementare pe Streams ar fi existat vreodată aici;
 designul pe liste pare original. **Întrebarea a mai fost pusă și răspunsă de două ori**:
-`docs/audit-pipeline-mqtt-20260702.md:16,29` („*NU Redis Streams!*", grep negativ) și
-`docs/remediation/WORKLOG.md:67`, care notează explicit că *memoria* unei sesiuni
+`docs/audit-pipeline-mqtt-20260702.md`, „Arhitectura reala a pipeline-ului (stabilita empiric)"
+(diagrama si punctul „Transport NU e Redis Streams."; „*NU Redis Streams!*", grep negativ) si
+`docs/remediation/WORKLOG.md` („Stare capturata (Faza 0)", „Cele 2 discrepante — REZOLVATE", punctul
+„(a) Transport pipeline = Redis LIST"), care noteaza explicit ca *memoria* unei sesiuni
 anterioare purta aceeași credință falsă despre Streams. Aceasta este a treia oară.
 
 **Reparația discutată atunci — „lipsa grupului detectată în buclă și recreată, deci
@@ -598,12 +645,12 @@ consumator care se vindecă singur" — există azi, în forma echivalentă pe l
 
 | ce | unde |
 | --- | --- |
-| listă `pending` proprie per worker `{pending}:{host}:{pid}` | `MqttConsume.php:302-305` |
-| heartbeat `SETEX`, TTL 90 s, reîmprospătat în fiecare iterație | `MqttConsume.php:323-332` |
-| mulțime de proprietari | `MqttConsume.php:310-316` |
-| replay al listei proprii la boot | `MqttConsume.php:358-397` |
-| recuperarea listei unui worker mort | `IngressLeaseReaper.php:59-107` |
-| **rulat în fiecare minut, nu doar la pornire** | `routes/console.php:35` |
+| lista `pending` proprie per worker `{pending}:{host}:{pid}` | `MqttConsume::pendingKey()` |
+| heartbeat `SETEX`, TTL 90 s, reimprospatat in fiecare iteratie | `MqttConsume::refreshHeartbeat()` |
+| multime de proprietari | `MqttConsume::registerOwner()` |
+| replay al listei proprii la boot | `MqttConsume::replayPending()` si `MqttConsume::replayList()` |
+| recuperarea listei unui worker mort | `IngressLeaseReaper::reap()` |
+| **rulat in fiecare minut, nu doar la pornire** | `Schedule::command('mqtt:reap-stale-ingress')` din `routes/console.php` |
 
 Deci proprietatea cerută — „dacă structura de consum dispare, ceva o reface în buclă"
 — **e implementată**, dar pentru un alt mecanism decât cel din amintire.
@@ -622,18 +669,25 @@ are analog al seriei `AUDIT-01…08` a serverului.
 
 | document (în `csms-server`) | ce a acoperit |
 | --- | --- |
-| `docs/audits/AUDIT-05-concurrency-distributed-state.md:25,32,142-199,835` | l-a listat explicit ca arbore inspectat la `v0.1.5`, i-a rulat suita (162 teste), iar **F-02** e o constatare dedicată pe `src/mqtt.ts` cu test RED; a verificat pozitiv și granița de ack |
-| `docs/audits/REMEDIATION-WAVE-3.md:49,724+` | ARC 9 — reparația și verificarea; tabelul notează `91e4e42 (162/0) → e0b25d5 (164/0)` |
-| `docs/audits/adjudication/RECON-WIRE-LIFECYCLES.md:1345-1346` | cea mai adâncă citire în afara AUDIT-05: 10 citate din 5 din cele 6 fișiere, **inclusiv defectul de ordine la pornire** (§6 C5) |
-| `docs/audits/adjudication/SWEEP-WIRE-LIFECYCLE-DEBTS.md:1453` | 4 citate; lasă CN-ul certificatului de prod explicit nerezolvat |
-| `docs/RECON-ONLINE-FIRMWARE-FACING-20260613.md:327-333` | subsecțiune scurtă: podul e un releu pur |
+| `docs/audits/AUDIT-05-concurrency-distributed-state.md`, „Summary" (punctele „Source snapshot inspected" si „Local verification performed"), „Findings" („F-02") si „What I checked and found clean" | l-a listat explicit ca arbore inspectat la `v0.1.5`, i-a rulat suita (162 teste), iar **F-02** e o constatare dedicata pe `src/mqtt.ts` cu test RED; a verificat pozitiv si granita de ack |
+| `docs/audits/REMEDIATION-WAVE-3.md`, „State — arcs 1–9 DONE + PROVEN LIVE on UAT (2026-07-13); ARC 9 fixed in bridge 0.1.7" (randul „Bridge `csms-mqtt-bridge` (`main`)") si de la „ARC 9 — Bridge shared-subscriber session survives a brief disconnect (FAM-4, cross-repo)" pana la sfarsitul fisierului | ARC 9 — reparatia si verificarea; tabelul noteaza `91e4e42 (162/0) → e0b25d5 (164/0)` |
+| `docs/audits/adjudication/RECON-WIRE-LIFECYCLES.md` („ORDERING", punctul despre `index.ts`: „documents an ordered startup (Redis before MQTT)") | cea mai adanca citire in afara AUDIT-05: 10 citate din 5 din cele 6 fisiere, **inclusiv defectul de ordine la pornire** (§6 C5) |
+| `docs/audits/adjudication/SWEEP-WIRE-LIFECYCLE-DEBTS.md` („SUMMARY", tabelul „OPEN — could not establish, and what would settle it", randul D6) | 4 citate; lasa CN-ul certificatului de prod explicit nerezolvat |
+| `docs/RECON-ONLINE-FIRMWARE-FACING-20260613.md` („6.4 Bridge: relay pur, fara transformare de payload (HEAD `91e4e42`)") | subsectiune scurta: podul e un releu pur |
 
 **Nouă documente au declinat explicit să-l auditeze**, între 2026-06-13 și
-2026-08-18 — printre care `docs/audits/RECON-EVIDENCE-LAYER.md:29-30` („*Nu l-am
-auditat.*"), `AUDIT-01:676`, `AUDIT-03:578-579`, `docs/audit-pipeline-mqtt-20260702.md:151`,
-`2-AUDIT-BOOT.md:123,792,1179,1187`. Unul se contrazice singur:
-`RECON-PROVISIONING-ARC.md` citează `src/mqtt.ts:99` la `:1360`, dar afirmă la
-`:1870` că repo-ul *„was not swept."*
+2026-08-18 — printre care `docs/audits/RECON-EVIDENCE-LAYER.md` (punctul „`ospp/csms-mqtt-bridge` — sidecar in
+calea de productie" din „Arborii, la momentul reconului": „*Nu l-am
+auditat.*"), `AUDIT-01` („What I could NOT check and why": „I could not inspect the MQTT bridge implementation"),
+`AUDIT-03` („What I could NOT check and why": „The MQTT bridge sidecar (`csms-mqtt-bridge`)"),
+`docs/audit-pipeline-mqtt-20260702.md` („Limitele auditului": „Repo-only."),
+`2-AUDIT-BOOT.md` (patru locuri: „4.2 Fluxul serverului", pasul „sidecar-ul furnizeaza worker-ului un
+camp `stationId`"; „8.1 Legarea conexiunii de station identity", paragraful „Primele doua verigi si
+comparatia handler-ului sunt demonstrate de"; „15. Concluzie finala", randurile „Este conexiunea legata
+sigur de identitatea statiei?" si „Serverul implementeaza corect contractul?"). Unul se contrazice singur:
+`RECON-PROVISIONING-ARC.md` citeaza `src/mqtt.ts` (cheia `cert` din `buildClientOptions`) la „D2. If the
+Station CA were rotated manually today", punctul „The server's own bridge", dar afirma la
+„STILL OPEN", „Scope this session did not cover", punctul „`csms-mqtt-bridge` as a repo.", ca repo-ul *„was not swept."*
 
 Adâncimea, cuantificată: constatările dedicate acoperă **un singur comportament**
 (persistența sesiunii MQTT 5) dintr-un singur fișier. **`metrics.ts` și `state.ts`
@@ -643,7 +697,7 @@ Atenție și la o omonimie: cele două `AUDIT-UAT-PROD-MIRROR.md` **nu sunt acel
 fișier**. Cel din `csms-server` (1076 linii, v3.5) e documentul viu — cel care a
 specificat podul în existență. Cel din acest repo (581 linii) e un instantaneu
 **înghețat v2 / 2026-04-27**, cu 2 commit-uri în total, care încă numește portul
-greșit al brokerului (`8884` la `:5`, față de `8883` deployat). E un jurnal de
+gresit al brokerului (`8884` in randul `**Scope**` din antet, fata de `8883` deployat). E un jurnal de
 proiectare, nu o recenzie de cod.
 
 ---
@@ -654,11 +708,11 @@ proiectare, nu o recenzie de cod.
 
 | # | ce | de ce contează |
 | --- | --- | --- |
-| C1 | Podul nu are nicio gardă `maxmemory-policy`. Cititorul are una fatală (`MqttConsume.php:173-198`); scriitorul, niciuna. | §2.3 — scriitorul e cel care pierde tăcut |
-| C2 | `/healthz` întoarce 200 necondiționat (`index.ts:93-97`); `isReady()` există și **nu e chemat niciodată** în producție; iar healthcheck-ul containerului nici măcar nu interoghează `/healthz` — e `kill -0 1`. | §2.2 — un pod înghețat raportează „healthy" pe toate cele trei niveluri |
+| C1 | Podul nu are nicio garda `maxmemory-policy`. Cititorul are una fatala (`MqttConsume::assertQueueRedisDurable()`); scriitorul, niciuna. | §2.3 — scriitorul e cel care pierde tacut |
+| C2 | `/healthz` intoarce 200 neconditionat (ramura `/healthz` din `index.ts`); `isReady()` exista si **nu e chemat niciodata** in productie; iar healthcheck-ul containerului nici macar nu interogheaza `/healthz` — e `kill -0 1`. | §2.2 — un pod inghetat raporteaza „healthy" pe toate cele trei niveluri |
 | C3 | `state.redisConnected`, `lastMessageReceivedAt`, `inflightOutbound` sunt scrise și necitite; nicio metrică nu le expune. | fără ele, blocajul din §2.2 e invizibil |
 | C4 | Niciun timeout pe `pushIncoming`. | un Redis care răspunde lent, dar nu cade, îngheață la fel |
-| C5 | Ordinea de pornire documentată la `index.ts:57-63` **nu e implementată**: IIFE-ul de la `:66-73` nu e așteptat, iar `startMqttClient` de la `:75` pornește imediat. Funcționează doar din accidentul cozii offline ioredis. **Deja raportat** în `csms-server/docs/audits/adjudication/RECON-WIRE-LIFECYCLES.md:1345-1346` — l-am regăsit independent, e încă deschis. | garanția scrisă nu există |
+| C5 | Ordinea de pornire documentata in comentariul „Ordered startup" din `index.ts` **nu e implementata**: IIFE-ul `void (async () => { ... await redis.start() ... })()` nu e asteptat, iar apelul `startMqttClient(config, redis, logger)` porneste imediat. Functioneaza doar din accidentul cozii offline ioredis. **Deja raportat** in `csms-server/docs/audits/adjudication/RECON-WIRE-LIFECYCLES.md` („ORDERING", punctul despre `index.ts`: „documents an ordered startup (Redis before MQTT)") — l-am regasit independent, e inca deschis. | garantia scrisa nu exista |
 | C6 | Calea de ieșire — de decis dacă se conectează sau se scoate (§1.3). | 28% din teste păzesc cod mort |
 | C7 | `ulimits: nofile:` lipsește din **toate** fișierele compose ⇒ brokerul rămâne la 1024 descriptori. | §3.2 — zidul de scară, azi implicit |
 | C8 | `REDIS_URL` al podului hardcodează portul, baza și schema parolei, în timp ce Laravel citește `REDIS_MQTT_PORT/DB/PASSWORD`. | §1.6 — trei axe pe care split-brain-ul se poate reforma |
@@ -675,17 +729,17 @@ proiectare, nu o recenzie de cod.
 | D5 | Niciun test end-to-end cu pod real + `mqtt:consume` real |
 | D6 | Nicio alertă `up{job=...}`; un pod mort sau înghețat nu declanșează nimic |
 | D7 | Nicio alertă pe vreo metrică `emqx_*` ⇒ plafonul de conexiuni e invizibil până la EMFILE |
-| D8 | Nicio verificare preflight pe `REDIS_MQTT_*`, deși `.env.prod.example:84` promite `GENERATED_BY_SCRIPT` (§1.6) |
+| D8 | Nicio verificare preflight pe `REDIS_MQTT_*`, desi `.env.prod.example` promite `GENERATED_BY_SCRIPT` la `REDIS_MQTT_PASSWORD` (§1.6) |
 | D9 | Rețeta money-e2e documentată pornește un pod care iese cu 1 — nimic n-o testează (§1.5) |
 
 ### Decizie lipsă
 
 | # | întrebarea |
 | --- | --- |
-| E1 | **Când se activează `redis-queue`?** Poarta e armată și documentată (`docker-compose.yml:118-122`); până atunci coada stă pe instanța care evacuează. Ambele capete trebuie mutate în același pas. |
-| E2 | **Se deployază `v0.1.7`, și se mută implicitul?** Cât timp `docker-compose.yml:149` are `:-0.1.5`, un mediu nou ia build-ul defect din start (§1.5). |
+| E1 | **Cand se activeaza `redis-queue`?** Poarta e armata si documentata (comentariul „ACTIVATION" din `docker-compose.yml`); pana atunci coada sta pe instanta care evacueaza. Ambele capete trebuie mutate in acelasi pas. |
+| E2 | **Se deployaza `v0.1.7`, si se muta implicitul?** Cat timp `image:` din serviciul `mqtt-bridge` al `docker-compose.yml` are `:-0.1.5`, un mediu nou ia build-ul defect din start (§1.5). |
 | E3 | **Calea de ieșire: se conectează sau se scoate?** Serverul a ales REST-ul EMQX și nu s-a întors. |
-| E4 | **Se corectează contractul pe deduplicare?** `REDIS-QUEUE-CONTRACT.md:251-256,270-272` prescrie o cheie care nu poate potrivi (§2.5). |
+| E4 | **Se corecteaza contractul pe deduplicare?** `REDIS-QUEUE-CONTRACT.md`, „Worker requirements" (Idempotency) si „6. Compatibility checklist" prescrie o cheie care nu poate potrivi (§2.5). |
 | E5 | **Cine deține `stn_s2_sweep`?** 161 de mesaje, 27% din livrări, aruncate legitim de o regulă corectă. |
 | E6 | **Se ridică `nofile` pe broker?** Marja e ~50×, dar modul de eșec e EMFILE, nu un refuz curat (§3.2). |
 
@@ -693,24 +747,29 @@ proiectare, nu o recenzie de cod.
 
 | unde | ce spune | realitatea |
 | --- | --- | --- |
-| `README.md:3,38-40` + diagrama | `$share/ospp-servers/...`, „shared subscription" | abonament simplu de la `2ba00e8` |
-| `README.md:41` | „bridge `BLPOP`s from `mqtt:outgoing`" | `BLMOVE`, și nu are producător |
-| `REDIS-QUEUE-CONTRACT.md:75-77` | plicurile vin pe abonamentul shared | idem |
-| `REDIS-QUEUE-CONTRACT.md:153` | „The bridge consumes with `BLPOP`" | `BLMOVE` — se contrazice cu `:234` din același document |
-| `REDIS-QUEUE-CONTRACT.md:224-225` | „for shared subscriptions, redistributes to another group member" | exact credința pe care F-02 a infirmat-o pe fir |
-| `REDIS-QUEUE-CONTRACT.md:39,267` | consumatorul folosește `BRPOP` | `BLMOVE … RIGHT LEFT` cu listă `pending` (direcția rămâne corectă) |
-| `REDIS-QUEUE-CONTRACT.md:5` | „Laravel Horizon job" | comandă artisan de sine stătătoare, container propriu |
-| `package.json:4` | „shared subscription" în descriere | idem |
+| `README.md`, paragraful care incepe „Node.js sidecar that bridges the EMQX MQTT broker", punctul **Inbound** din `Architecture` + diagrama | `$share/ospp-servers/...`, „shared subscription" | abonament simplu de la `2ba00e8` |
+| `README.md`, punctul **Outbound** din `Architecture` | „bridge `BLPOP`s from `mqtt:outgoing`" | `BLMOVE`, si nu are producator |
+| `REDIS-QUEUE-CONTRACT.md`, „3. Inbound envelope", paragraful „Pushed by the bridge for every MQTT publish" | plicurile vin pe abonamentul shared | idem |
+| `REDIS-QUEUE-CONTRACT.md`, „4. Outgoing envelope", paragraful „Pushed by the csms-server worker when it needs to send a message to a station" | „The bridge consumes with `BLPOP`" | `BLMOVE` — se contrazice cu „Outbound: worker → Redis → bridge → broker" din acelasi document |
+| `REDIS-QUEUE-CONTRACT.md`, „Inbound: broker → bridge → Redis" | „for shared subscriptions, redistributes to another group member" | exact credinta pe care F-02 a infirmat-o pe fir |
+| `REDIS-QUEUE-CONTRACT.md`, tabelul „2. Queue keys" si lista „6. Compatibility checklist" | consumatorul foloseste `BRPOP` | `BLMOVE … RIGHT LEFT` cu lista `pending` (directia ramane corecta) |
+| `REDIS-QUEUE-CONTRACT.md`, paragraful „This is the authoritative schema for the envelopes" | „Laravel Horizon job" | comanda artisan de sine statatoare, container propriu |
+| `package.json`, cheia `description` | „shared subscription" in descriere | idem |
 
 ---
 
 ## 7. Ce nu am putut stabili
 
 - **Dacă podul rulează chiar acum în UAT și PROD.** Deploy-ul e complet cablat
-  (§1.5) și a fost verificat viu în trecut — `docs/REPORT-UAT-PARITY-AUDIT-20260526…:45`
-  (ambele containere pe același SHA de imagine), `REPORT-FULL-COVERAGE-RERUN-20260527…:384`
-  (`csms-mqtt-bridge-prod` Up 4 zile, healthy), `AUDIT-UAT-PROD-MIRROR.md:523`. Dovezi
-  indirecte recente: `KNOWN-ISSUES.md:1889-1890` („UAT lost its bridge for four days").
+  (§1.5) si a fost verificat viu in trecut — `docs/REPORT-UAT-PARITY-AUDIT-20260526T114644Z.md`
+  („2. Phase 0 — container map (UAT ↔ Prod)", randul `mqtt-bridge`)
+  (ambele containere pe acelasi SHA de imagine), `docs/REPORT-FULL-COVERAGE-RERUN-20260527T110136Z.md`
+  („10. Phase 0 — Prod audit (mandatory final check)", randul `csms-mqtt-bridge-prod`)
+  (`csms-mqtt-bridge-prod` Up 4 zile, healthy), `AUDIT-UAT-PROD-MIRROR.md`
+  („2. Phased plan", Phase 0, „Operations (current state on UAT VPS ...)", punctul `csms-mqtt-bridge-uat`
+  running healthy). Dovezi
+  indirecte recente: `KNOWN-ISSUES.md` („Settings that are correct, live, and cannot be turned on yet — the
+  precondition class": „UAT lost its bridge for four days").
   Dar **niciun document din august 2026 nu afirmă că rulează**, iar eu nu am acces la
   gazde. **NESTABILIT.**
 - **Valorile de mediu reale din UAT/PROD.** `.env*` sunt gitignorate; `.env.uat` din
@@ -725,11 +784,13 @@ proiectare, nu o recenzie de cod.
   nu sunt.** Flota de 4 stații și volumul de 2794 mesaje/28 zile sunt citate din
   `KNOWN-ISSUES.md`, nu măsurate de mine.
 - **Dacă `csms_bridge_topic_drops_total` e chiar scrapat.** Ținta e configurată în
-  ambele fișiere Prometheus (`prometheus.yml:38-44`, `prometheus-prod.yml:42-48`),
-  alerta există (`alerts.yml:495-514`), iar `/metrics` răspunde din rețea — dar
+  ambele fisiere Prometheus (jobul `csms-mqtt-bridge` din `prometheus.yml` si din
+  `prometheus-prod.yml`),
+  alerta exista (grupul `csms_bridge` din `alerts.yml`), iar `/metrics` raspunde din retea — dar
   **Prometheus nu rulează local**, deci sănătatea scrape-ului se poate confirma doar
   pe mediul unde rulează.
-- **Comentariile din `SessionEndedHandler.php:100-103` și `StopOrderInversionTest.php:50-54`.**
+- **Comentariile din `SessionEndedHandler::handle()` („And the order is not ours to rely on") si din antetul
+  `StopOrderInversionTest.php` („THE INVERSION IS NOT HYPOTHETICAL").**
   Semantica Redis e măsurată și neambiguă (§2.6), dar fișierele sunt în `csms-server`,
   unde nu am scris și nu am rulat nimic. Rămâne de adjudecat acolo.
 - **Comportamentul sub o pană Redis mai lungă de ~25 s** l-am extrapolat din funcția
@@ -752,7 +813,7 @@ Ce am rulat, ca să se poată reface sau contrazice:
 | ordine | `LPUSH`/`BLMOVE RIGHT`/`RPUSH` pe Redis real, cu urmărirea listei la fiecare pas |
 | debit | 3000 împingeri secvențiale prin `pushIncoming` real |
 | plafoane broker | `emqx ctl clients list`, `emqx ctl listeners`, `emqx ctl conf show mqtt`, `ulimit -n` |
-| pompa mqtt.js | citirea `node_modules/mqtt/build/lib/client.js:262-296` și `handlers/publish.js:87-92` |
+| pompa mqtt.js | citirea `node_modules/mqtt/build/lib/client.js` (`work`, `nextTickWork` si `writable._write` din `MqttClient#connect`) si `handlers/publish.js` (`handlePublish`, cazul QoS 1) |
 
 Stiva locală **nu a fost atinsă**: proba a folosit un container Redis separat
 (`audit-redis-probe`, șters la final) și un port separat. `csms-server` a fost citit
@@ -790,14 +851,17 @@ Altă sesiune scrie în acel arbore. Nimic din ce urmează nu a fost modificat d
 
 Două comentarii susțin că o reîncercare inversează ordinea de pe fir:
 
-- `app/Modules/Session/Handlers/SessionEndedHandler.php:100-103`
-- `tests/Integration/Modules/Session/Handlers/StopOrderInversionTest.php:50-56`
+- `app/Modules/Session/Handlers/SessionEndedHandler.php`, `SessionEndedHandler::handle()`, paragraful „And the order is
+  not ours to rely on"
+- `tests/Integration/Modules/Session/Handlers/StopOrderInversionTest.php`, comentariul de antet, paragraful „THE
+  INVERSION IS NOT HYPOTHETICAL"
 
-Ambele spun: *„MqttConsume:450 re-queues a soft-failed envelope with RPUSH — the TAIL
+Ambele spun, despre `MqttConsume::handleFailure()` (`rpush`-ul reincercarii):
+*„re-queues a soft-failed envelope with RPUSH — the TAIL
 of mqtt:incoming … puts it behind the EVENT that followed it on the wire."*
 
 **„TAIL" e corect. „Behind" e invers.** Consumatorul scoate din **RIGHT**
-(`MqttConsume.php:221-236`), iar `RPUSH` scrie tot la RIGHT — deci plicul reîncercat e
+(`MqttConsume::blockingMove()`), iar `RPUSH` scrie tot la RIGHT — deci plicul reincercat e
 **următorul scos**, nu ultimul. Măsurat pe Redis real:
 
 ```
@@ -806,7 +870,7 @@ listă L..R: D C B A ; scoaterile următoare:  A B C D      ← ordinea de pe fi
 ```
 
 Un singur plic reîncercat cu `RPUSH` **păstrează** ordinea. Consecința reală a
-`MqttConsume.php:443-448` nu e inversarea, ci **blocarea capului de coadă**: `sleep(2|4|8)`
+`MqttConsume::handleFailure()` nu e inversarea, ci **blocarea capului de coada**: `sleep(2|4|8)`
 sincron, apoi același plic reintră primul — până la ~14 s în care nimic altceva nu se
 consumă, apoi DLQ.
 
@@ -823,17 +887,17 @@ Priveşte trei locuri:
 
 | loc | ce face | efect la ≥2 elemente |
 | --- | --- | --- |
-| `MqttConsume.php:378-390` (`replayList`) | `LMOVE pending incoming RIGHT RIGHT` în buclă | **inversare** |
-| `IngressLeaseReaper.php:87` | idem, pentru lista unui worker mort | **inversare** — iar comentariul de la `:83-84` spune explicit *„(RIGHT→RIGHT preserves FIFO)"*, ceea ce e adevărat **doar pentru un singur element** |
-| `DeadLetterQueue.php:109` | `rpush(incoming)` per mesaj la un replay de operator | **inversare** între ele, **și** sar peste tot restul cozii |
+| `MqttConsume::replayList()` | `LMOVE pending incoming RIGHT RIGHT` in bucla | **inversare** |
+| `IngressLeaseReaper::reap()` | idem, pentru lista unui worker mort | **inversare** — iar comentariul din `reap()` de deasupra lui `$pendingKey` spune explicit *„(RIGHT→RIGHT preserves FIFO)"*, ceea ce e adevarat **doar pentru un singur element** |
+| `DeadLetterQueue::replayEntry()` | `rpush(incoming)` per mesaj la un replay de operator | **inversare** intre ele, **si** sar peste tot restul cozii |
 
 Măsurat pentru ultimul: cu restanța `N1,N2` în coadă, un replay de `OLD1,OLD2,OLD3`
 se consumă `OLD3, OLD2, OLD1, N1, N2`.
 
 **Cât de des se armează:** în operare normală `pending` ține **≤1** element (claim →
-procesare → `lrem` la `:136`), deci inversarea din replay cere fie o cădere cu >1 plic
+procesare → `lrem` in `MqttConsume::handle()`), deci inversarea din replay cere fie o cadere cu >1 plic
 în zbor, fie cheia `pending` moștenită, ne-sufixată, pe care `replayPending()` o
-drenează și ea (`:361`), fie un replay de operator cu mai multe mesaje. Nu e o cale
+dreneaza si ea (`replayList($this->workerConfig()['queues']['pending'])` din `replayPending()`), fie un replay de operator cu mai multe mesaje. Nu e o cale
 fierbinte — dar e exact clasa pe care comentariile o caută, sub alt nume.
 
 **Nu am rulat nimic în acel arbore.** Măsurătorile de mai sus sunt pe un Redis de unică
@@ -841,10 +905,11 @@ folosință, reproducând comenzile citate. Adjudecarea e acolo.
 
 ### 10.2 Suita de fir nu dovedeşte calea de producţie
 
-`tests/MqttIntegration/MqttMoneyTestCase.php:126-160` îşi ridică propriul client mTLS
-şi se abonează direct la broker; `:183-225` cheamă `MessageDispatcher` în proces —
+`MqttMoneyTestCase::connectServerConsumer()` (`tests/MqttIntegration/MqttMoneyTestCase.php`) isi ridica
+propriul client mTLS
+si se aboneaza direct la broker; `MqttMoneyTestCase::pumpWire()` cheama `MessageDispatcher` in proces —
 o **reimplementare** a lui `MqttConsume::handleEnvelope`, după cum spune propriul
-docblock de la `:178-181`. Nici podul, nici coada Redis, nici consumatorul real nu
+docblock al lui `pumpWire()`. Nici podul, nici coada Redis, nici consumatorul real nu
 sunt în cale. Suita e verde şi nu spune nimic despre calea prin care trece fiecare
 mesaj în producţie.
 
@@ -858,7 +923,8 @@ Ce ar cere o probă reală, fără să o construiesc:
    dintre a testa dispecerul şi a testa *drumul*.
 3. **Închide contenţia, nu o ignora.** Cât consumatorul real e sus, el concurează cu
    harnaşamentul pe acelaşi filtru de topic — măsurat în arbore: **2/39 pică** cu el
-   pornit, **39/39** cu `docker stop csms-mqtt-consumer` (`MqttIntegrationTestCase.php:60-77`).
+   pornit, **39/39** cu `docker stop csms-mqtt-consumer` (comentariul clasei `MqttIntegrationTestCase`, paragraful „ANOTHER PROCESS CAN
+   DECIDE THESE TESTS, AND ON THE DEV STACK IT DOES.").
    Cu cozi separate pe prefix, contenţia dispare de la sine.
 4. **Aserţiunea care contează:** publică pe `ospp/v1/stations/<id>/to-server` şi verifică
    efectul în **bază**, nu în harnaşament. Un plic care ajunge în `test:mqtt:incoming`

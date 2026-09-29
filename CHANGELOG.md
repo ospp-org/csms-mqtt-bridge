@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/AUDIT-UAT-PROD-MIRROR.md`, the frozen v2 audit: its 15 line citations are names of what
   the lines held on 2026-04-27 - csms-server at `b261c789`, the spec at v0.2.4. The audit's
   claims are unchanged.
+- `docs/AUDIT-MQTT-BRIDGE.md`: 168 of its 169 line citations are names of what the lines held
+  when it was measured on 2026-08-18 - the bridge at `2ba00e8`, csms-server at `d8c595b6`,
+  mqtt.js 5.15.1. The one left as written is the local-dev `docker-compose.override.yml` row
+  of the deployment table: csms-server never tracked that file, so there is no commit to
+  resolve it against. The audit's claims are unchanged.
 
 ### Internal
 
