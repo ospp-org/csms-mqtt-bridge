@@ -27,7 +27,7 @@ import {
   startMqttClient,
 } from '../mqtt.js';
 import type { IncomingEnvelope, RedisBridge } from '../redis.js';
-import { resetState, state } from '../state.js';
+import { oldestInboundInFlight, resetState, state } from '../state.js';
 
 // ── Test doubles ────────────────────────────────────────────────────────────
 
@@ -105,8 +105,9 @@ const start = (
   cfg: Config,
   redis: ReturnType<typeof makeFakeRedis>,
   connector: MqttConnector,
+  onFatal: (err: Error) => void = vi.fn(),
 ): MqttBridge => {
-  const bridge = startMqttClient(cfg, redis, silentLogger, connector);
+  const bridge = startMqttClient(cfg, redis, silentLogger, connector, onFatal);
   activeBridges.push(bridge);
   return bridge;
 };
@@ -441,6 +442,107 @@ describe('startMqttClient', () => {
   });
 });
 
+// ── The inbound grant — what the SUBACK actually gave ───────────────────────
+//
+// The bridge asked for QoS 1 and never looked at the answer. A SUBACK refusal (a
+// reason code >= 0x80) was logged and the bridge ran on subscribed to nothing - still
+// connected, still answering /healthz 200, receiving no station message at all. A grant
+// DOWNGRADED to QoS 0 was logged as a success: at QoS 0 the broker queues nothing for
+// the persistent session and waits for no PUBACK, so the manual ack that withholds the
+// PUBACK until the Redis push lands guards nothing. Both are errors the bridge reports
+// and does not run past; onFatal is the path that ends the process.
+
+describe('startMqttClient — the inbound grant (SUBACK)', () => {
+  const connack: IConnackPacket = {
+    cmd: 'connack',
+    sessionPresent: false,
+    reasonCode: 0,
+    returnCode: 0,
+  };
+
+  /** A client whose SUBACK answers with the given error and grant, as mqtt.js 5 hands them over. */
+  const clientAnswering = (
+    err: Error | null,
+    granted: ISubscriptionGrant[],
+  ): FakeMqttClient => {
+    const client = makeFakeClient();
+    client.subscribe = vi.fn(
+      (
+        _topic: string,
+        _opts: IClientSubscribeOptions,
+        cb: (e: Error | null, g: ISubscriptionGrant[]) => void,
+      ) => {
+        cb(err, granted);
+        return client as unknown as MqttClient;
+      },
+    );
+    return client;
+  };
+
+  it('reports a refused subscription and does not run past it', async () => {
+    // mqtt.js 5 rejects a SUBACK whose reason code has the 0x80 bit with an
+    // ErrorWithSubackPacket that carries the SUBACK itself; 135 is Not authorized,
+    // what an ACL deny answers.
+    const refusal = Object.assign(new Error('Subscribe error: Not authorized'), {
+      packet: { cmd: 'suback', messageId: 1, granted: [135] },
+    });
+    const client = clientAnswering(refusal, [{ topic: STATION_INBOUND_TOPIC, qos: 1 }]);
+    const onFatal = vi.fn();
+
+    start(validConfig, makeFakeRedis(), () => client as unknown as MqttClient, onFatal);
+    client.emit('connect', connack);
+    await flushMicrotasks();
+
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    const reported = onFatal.mock.calls[0]?.[0] as Error;
+    expect(reported).toBeInstanceOf(Error);
+    expect(reported.message).toMatch(/refused/i);
+    expect(reported.message).toContain('135');
+  });
+
+  it('reports a grant downgraded to QoS 0 for the QoS 1 it asked, and does not run past it', async () => {
+    const client = clientAnswering(null, [{ topic: STATION_INBOUND_TOPIC, qos: 0 }]);
+    const onFatal = vi.fn();
+
+    start(validConfig, makeFakeRedis(), () => client as unknown as MqttClient, onFatal);
+    client.emit('connect', connack);
+    await flushMicrotasks();
+
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    const reported = onFatal.mock.calls[0]?.[0] as Error;
+    expect(reported.message).toMatch(/downgraded/i);
+    expect(reported.message).toContain('QoS 0');
+  });
+
+  it('runs on when the grant is the QoS it asked for', async () => {
+    const client = clientAnswering(null, [{ topic: STATION_INBOUND_TOPIC, qos: 1 }]);
+    const onFatal = vi.fn();
+
+    start(validConfig, makeFakeRedis(), () => client as unknown as MqttClient, onFatal);
+    client.emit('connect', connack);
+    await flushMicrotasks();
+
+    expect(onFatal).not.toHaveBeenCalled();
+  });
+
+  it('does not read a connection lost before the SUBACK as a refusal - the next connect subscribes again', async () => {
+    // mqtt.js flushes a pending SUBSCRIBE with a bare 'Connection closed' error and no
+    // SUBACK when the stream closes first. Nothing was refused; the reconnect's own
+    // 'connect' subscribes again, and a connection that never comes back is the
+    // watchdog's to catch, not this path's.
+    const client = clientAnswering(new Error('Connection closed'), [
+      { topic: STATION_INBOUND_TOPIC, qos: 1 },
+    ]);
+    const onFatal = vi.fn();
+
+    start(validConfig, makeFakeRedis(), () => client as unknown as MqttClient, onFatal);
+    client.emit('connect', connack);
+    await flushMicrotasks();
+
+    expect(onFatal).not.toHaveBeenCalled();
+  });
+});
+
 // ── Inbound — handleMessage manual ack ──────────────────────────────────────
 
 describe('startMqttClient — inbound (handleMessage manual ack)', () => {
@@ -571,6 +673,105 @@ describe('startMqttClient — inbound (handleMessage manual ack)', () => {
     expect(Buffer.from(fakeRedis.pushed[0]?.payload ?? '', 'base64').toString()).toBe(
       'hello-string',
     );
+  });
+});
+
+// ── What the watchdog reads — the three ways the bridge gets stuck ──────────
+//
+// The watchdog (src/watchdog.ts) decides from these fields; these tests pin that the
+// MQTT side keeps them true. Only Date is faked: the handlers still run on real
+// microtasks and setImmediate.
+
+describe('startMqttClient — stuck-state tracking', () => {
+  const connack: IConnackPacket = {
+    cmd: 'connack',
+    sessionPresent: false,
+    reasonCode: 0,
+    returnCode: 0,
+  };
+  const inboundTopic = 'ospp/v1/stations/stn_00000001/to-server';
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('marks the broker connection down from the first loss, and up again on connect', () => {
+    const client = makeFakeClient();
+    start(validConfig, makeFakeRedis(), () => client as unknown as MqttClient);
+
+    vi.setSystemTime(1_000_000);
+    client.emit('connect', connack);
+    expect(state.mqttDownSince).toBeNull();
+
+    vi.setSystemTime(1_005_000);
+    client.emit('close');
+    expect(state.mqttDownSince).toBe(1_005_000);
+
+    // mqtt.js follows a close with offline, and reconnect attempts after that; the
+    // clock keeps counting from the first loss, not from the latest event.
+    vi.setSystemTime(1_006_000);
+    client.emit('offline');
+    expect(state.mqttDownSince).toBe(1_005_000);
+
+    vi.setSystemTime(1_007_000);
+    client.emit('connect', connack);
+    expect(state.mqttDownSince).toBeNull();
+  });
+
+  it('holds the receipt time of a message whose push has not settled, and clears it when it does', async () => {
+    const client = makeFakeClient();
+    const redis = makeFakeRedis();
+    let settle: () => void = () => undefined;
+    redis.pushIncoming = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    start(validConfig, redis, () => client as unknown as MqttClient);
+
+    vi.setSystemTime(2_000_000);
+    const acked = callHandleMessage(client, makePacket(inboundTopic, Buffer.from('x')));
+    await flushMicrotasks();
+
+    expect(oldestInboundInFlight()).toBe(2_000_000);
+
+    settle();
+    expect(await acked).toBeUndefined();
+    expect(oldestInboundInFlight()).toBeNull();
+  });
+
+  it('records the first message left unacknowledged on this connection, until a new connection', async () => {
+    const client = makeFakeClient();
+    const redis = makeFakeRedis();
+    redis.pushIncoming = vi.fn((): Promise<void> => Promise.reject(new Error('OOM')));
+    start(validConfig, redis, () => client as unknown as MqttClient);
+    client.emit('connect', connack);
+
+    vi.setSystemTime(3_000_000);
+    expect(await callHandleMessage(client, makePacket(inboundTopic, Buffer.from('a')))).toBeInstanceOf(
+      Error,
+    );
+    expect(state.unackedSince).toBe(3_000_000);
+    expect(oldestInboundInFlight()).toBeNull();
+
+    // A later refusal does not move the clock, and a later SUCCESS does not clear it:
+    // the first message is still unacknowledged, and the broker resends it only on a
+    // new connection (retry_interval = infinity on the deployed broker).
+    vi.setSystemTime(3_010_000);
+    await callHandleMessage(client, makePacket(inboundTopic, Buffer.from('b')));
+    redis.pushIncoming = vi.fn((): Promise<void> => Promise.resolve());
+    vi.setSystemTime(3_020_000);
+    expect(await callHandleMessage(client, makePacket(inboundTopic, Buffer.from('c')))).toBeUndefined();
+    expect(state.unackedSince).toBe(3_000_000);
+
+    client.emit('close');
+    client.emit('connect', connack);
+    expect(state.unackedSince).toBeNull();
   });
 });
 
