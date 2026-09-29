@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cited text at v0.44.0. Two of the sections, "3.2 MQTT Setup" and the "Server Core"
   conformance checklist, ask for a shared subscription; the README now says the bridge
   holds a plain one, and `package.json` cites only "The Three Actors".
+- README, `package.json` and `docs/REDIS-QUEUE-CONTRACT.md` said "Redis queues". There has
+  been one since 0.2.0 - `REDIS_QUEUE_INCOMING`, whose only writer is `pushIncoming` - so each
+  now says "a Redis queue".
 
 ### Internal
 

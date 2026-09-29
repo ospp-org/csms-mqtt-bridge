@@ -1,7 +1,7 @@
 # Redis queue contract — `csms-mqtt-bridge` ↔ csms-server
 
 This is the authoritative schema for the envelopes that flow over the Redis
-queues between `csms-mqtt-bridge` (this service) and the csms-server
+queue between `csms-mqtt-bridge` (this service) and the csms-server
 worker (`php artisan mqtt:consume` — a standalone long-running command in its
 own container, NOT a Horizon job).
 
