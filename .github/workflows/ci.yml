@@ -17,6 +17,11 @@ jobs:
   ci:
     name: lint + typecheck + test + build
     runs-on: ubuntu-latest
+    # Without a limit GitHub gives a job 360 minutes. This one takes under a minute: 16 to
+    # 51 seconds over its 20 runs on main up to v0.2.1, and 42 to 51 since the Redis service
+    # below was added. 20 minutes, the release job's limit, is over twenty times its longest
+    # run and fails a hang in 20 minutes instead of 360.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
