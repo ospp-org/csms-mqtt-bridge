@@ -463,10 +463,7 @@ describe('startMqttClient — the inbound grant (SUBACK)', () => {
   };
 
   /** A client whose SUBACK answers with the given error and grant, as mqtt.js 5 hands them over. */
-  const clientAnswering = (
-    err: Error | null,
-    granted: ISubscriptionGrant[],
-  ): FakeMqttClient => {
+  const clientAnswering = (err: Error | null, granted: ISubscriptionGrant[]): FakeMqttClient => {
     const client = makeFakeClient();
     client.subscribe = vi.fn(
       (
@@ -635,27 +632,24 @@ describe('startMqttClient — inbound (handleMessage manual ack)', () => {
     ['ospp/v1/stations/stn_smoke3fe34372/to-server', 'non_compliant_station_id'],
     ['ospp/v1/stations/stn_00000001/to-server/extra', 'wrong_topic_format'],
     ['random/garbage/topic', 'other'],
-  ])(
-    'increments topicDropsTotal{reason=%s} when dropping "%s"',
-    async (topic, expectedReason) => {
-      const { topicDropsTotal } = await import('../metrics.js');
-      const readCount = async (reason: string): Promise<number> => {
-        const snapshot = await topicDropsTotal.get();
-        const found = snapshot.values.find((v) => v.labels.reason === reason);
-        return found?.value ?? 0;
-      };
-      const before = await readCount(expectedReason);
+  ])('increments topicDropsTotal{reason=%s} when dropping "%s"', async (topic, expectedReason) => {
+    const { topicDropsTotal } = await import('../metrics.js');
+    const readCount = async (reason: string): Promise<number> => {
+      const snapshot = await topicDropsTotal.get();
+      const found = snapshot.values.find((v) => v.labels.reason === reason);
+      return found?.value ?? 0;
+    };
+    const before = await readCount(expectedReason);
 
-      const fakeClient = makeFakeClient();
-      const fakeRedis = makeFakeRedis();
-      start(validConfig, fakeRedis, () => fakeClient as unknown as MqttClient);
-      const result = await callHandleMessage(fakeClient, makePacket(topic, Buffer.from('x')));
+    const fakeClient = makeFakeClient();
+    const fakeRedis = makeFakeRedis();
+    start(validConfig, fakeRedis, () => fakeClient as unknown as MqttClient);
+    const result = await callHandleMessage(fakeClient, makePacket(topic, Buffer.from('x')));
 
-      expect(result).toBeUndefined();
-      expect(fakeRedis.pushed).toHaveLength(0);
-      expect((await readCount(expectedReason)) - before).toBe(1);
-    },
-  );
+    expect(result).toBeUndefined();
+    expect(fakeRedis.pushed).toHaveLength(0);
+    expect((await readCount(expectedReason)) - before).toBe(1);
+  });
 
   it('handles payload as string (rare mqtt.js path)', async () => {
     const fakeClient = makeFakeClient();
@@ -755,9 +749,9 @@ describe('startMqttClient — stuck-state tracking', () => {
     client.emit('connect', connack);
 
     vi.setSystemTime(3_000_000);
-    expect(await callHandleMessage(client, makePacket(inboundTopic, Buffer.from('a')))).toBeInstanceOf(
-      Error,
-    );
+    expect(
+      await callHandleMessage(client, makePacket(inboundTopic, Buffer.from('a'))),
+    ).toBeInstanceOf(Error);
     expect(state.unackedSince).toBe(3_000_000);
     expect(oldestInboundInFlight()).toBeNull();
 
@@ -768,7 +762,9 @@ describe('startMqttClient — stuck-state tracking', () => {
     await callHandleMessage(client, makePacket(inboundTopic, Buffer.from('b')));
     redis.pushIncoming = vi.fn((): Promise<void> => Promise.resolve());
     vi.setSystemTime(3_020_000);
-    expect(await callHandleMessage(client, makePacket(inboundTopic, Buffer.from('c')))).toBeUndefined();
+    expect(
+      await callHandleMessage(client, makePacket(inboundTopic, Buffer.from('c'))),
+    ).toBeUndefined();
     expect(state.unackedSince).toBe(3_000_000);
 
     client.emit('close');

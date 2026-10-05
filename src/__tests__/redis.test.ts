@@ -233,7 +233,8 @@ describe('assertQueueDurable', () => {
     });
     expect(warn).toHaveBeenCalledOnce();
     const body = await metricsRegister.metrics();
-    expect(body).toMatch(/csms_bridge_queue_durability_violations_total\{[^}]*policy="allkeys-lru"[^}]*\} 1/);
+    expect(body).toMatch(
+      /csms_bridge_queue_durability_violations_total\{[^}]*policy="allkeys-lru"[^}]*\} 1/,
+    );
   });
-
 });

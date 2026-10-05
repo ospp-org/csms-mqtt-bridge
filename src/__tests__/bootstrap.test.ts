@@ -10,15 +10,14 @@ import { createRedisBridge } from '../redis.js';
 
 const DURABLE: QueueDurability = { durable: true, policy: 'noeviction' };
 
-const makeRedis = (over: Partial<RedisBridge> = {}): RedisBridge =>
-  ({
-    start: vi.fn((): Promise<void> => Promise.resolve()),
-    assertQueueDurable: vi.fn((): Promise<QueueDurability> => Promise.resolve(DURABLE)),
-    pushIncoming: vi.fn(),
-    quit: vi.fn(),
-    isReady: vi.fn(() => true),
-    ...over,
-  });
+const makeRedis = (over: Partial<RedisBridge> = {}): RedisBridge => ({
+  start: vi.fn((): Promise<void> => Promise.resolve()),
+  assertQueueDurable: vi.fn((): Promise<QueueDurability> => Promise.resolve(DURABLE)),
+  pushIncoming: vi.fn(),
+  quit: vi.fn(),
+  isReady: vi.fn(() => true),
+  ...over,
+});
 
 const silent = {
   info: vi.fn(),

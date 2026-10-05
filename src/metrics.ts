@@ -95,7 +95,7 @@ export const queueDurabilityViolationsTotal = new Counter({
  */
 export const inboundPushFailuresTotal = new Counter({
   name: 'csms_bridge_inbound_push_failures_total',
-  help: "Inbound messages the bridge failed to enqueue and therefore did NOT ack. Broker will redeliver; nothing is lost.",
+  help: 'Inbound messages the bridge failed to enqueue and therefore did NOT ack. Broker will redeliver; nothing is lost.',
   registers: [register],
 });
 

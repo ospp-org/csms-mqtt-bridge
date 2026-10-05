@@ -3,7 +3,13 @@ import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { buildInfo, classifyDropReason, register, setBuildInfo, topicDropsTotal } from '../metrics.js';
+import {
+  buildInfo,
+  classifyDropReason,
+  register,
+  setBuildInfo,
+  topicDropsTotal,
+} from '../metrics.js';
 import { resetState, state } from '../state.js';
 
 describe('classifyDropReason', () => {
@@ -40,8 +46,12 @@ describe('topicDropsTotal counter', () => {
     const rendered = await register.metrics();
     expect(rendered).toContain('# HELP csms_bridge_topic_drops_total');
     expect(rendered).toContain('# TYPE csms_bridge_topic_drops_total counter');
-    expect(rendered).toMatch(/csms_bridge_topic_drops_total\{[^}]*reason="non_compliant_station_id"[^}]*\} \d+/);
-    expect(rendered).toMatch(/csms_bridge_topic_drops_total\{[^}]*reason="wrong_topic_format"[^}]*\} \d+/);
+    expect(rendered).toMatch(
+      /csms_bridge_topic_drops_total\{[^}]*reason="non_compliant_station_id"[^}]*\} \d+/,
+    );
+    expect(rendered).toMatch(
+      /csms_bridge_topic_drops_total\{[^}]*reason="wrong_topic_format"[^}]*\} \d+/,
+    );
     expect(rendered).toMatch(/csms_bridge_topic_drops_total\{[^}]*reason="other"[^}]*\} \d+/);
     // service label is set as a default label on the registry — proves the registry config
     expect(rendered).toMatch(/service="csms-mqtt-bridge"/);

@@ -36,7 +36,9 @@ const cfgFor = (k: string): Config =>
     REDIS_REQUIRE_NOEVICTION: true,
   }) as unknown as Config;
 
-const envelope = (i: number): Parameters<ReturnType<typeof createRedisBridge>['pushIncoming']>[0] => ({
+const envelope = (
+  i: number,
+): Parameters<ReturnType<typeof createRedisBridge>['pushIncoming']>[0] => ({
   version: 1,
   topic: 'ospp/v1/stations/stn_00000001/to-server',
   stationId: 'stn_00000001',

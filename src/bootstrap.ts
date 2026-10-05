@@ -32,7 +32,11 @@ export interface BootstrapDeps {
  * offline queue kept it from misbehaving. Reported in csms-server
  * docs/audits/adjudication/RECON-WIRE-LIFECYCLES.md, under its ORDERING heading.
  */
-export const bootstrap = async ({ redis, startMqtt, logger }: BootstrapDeps): Promise<MqttBridge> => {
+export const bootstrap = async ({
+  redis,
+  startMqtt,
+  logger,
+}: BootstrapDeps): Promise<MqttBridge> => {
   await redis.start();
   logger.info('redis ready; asserting queue durability before touching the broker');
 
