@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- `docs/REDIS-QUEUE-CONTRACT.md`: "Reliability semantics" no longer says the bridge is
+  at-least-once "in both directions as of Phase 0.5". It carries one direction since 0.2.0,
+  inbound - the section's only subsection - and what the application sends goes over the EMQX
+  REST API.
+- The station id bound `stn_[a-f0-9]{8,60}` is the spec's as well as csms-server's: the
+  contract's `topic` member credited it to `01-architecture.md` section 3.1, which states
+  `^stn_[a-f0-9]{8,}$` with no upper bound, and the comment above `STATION_TOPIC_RE` in
+  `src/mqtt.ts` said the spec sets none. The 60 is the spec's station-id schema's `maxLength`
+  of 64, less `stn_`; both now say so.
 - README: the repository layout lists the tracked tree. It still showed the initial
   scaffold - `src/index.ts` as a placeholder, `ci.yml` as the only workflow - and none of
   the other `src/` modules, `docs/` or `release.yml`.

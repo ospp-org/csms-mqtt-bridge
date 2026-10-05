@@ -57,11 +57,12 @@ export const serverStatusTopicFor = (clientId: string): string =>
 // 60 lowercase hex characters. csms-server writes stations.station_id through one rule
 // (RegisterStationRequest's `stationId`, `^stn_[a-f0-9]{8,60}$`), and its CsrValidator
 // makes a station certificate's CN - the client id the broker admits, and the station
-// segment of the topic - equal to that id. The spec (01-architecture.md, section 3.1
-// Identifier Format; glossary, Station) sets no upper bound; 60 is csms-server's, its
-// VARCHAR(64) column less the prefix. The broker's ACL admits more than this - any
-// `stn_` client id, and `SIM-` / `sim-` ones on their own topics - and none of those
-// names can be issued by csms-server.
+// segment of the topic - equal to that id. The spec bounds it the same way: 01-architecture.md,
+// section 3.1 Identifier Format, states `^stn_[a-f0-9]{8,}$` with no upper bound, and its
+// station-id schema (schemas/common/station-id.schema.json) caps the id at 64 characters,
+// `stn_` and 60 hex - csms-server's VARCHAR(64) column less the prefix. The broker's ACL
+// admits more than this - any `stn_` client id, and `SIM-` / `sim-` ones on their own
+// topics - and none of those names can be issued by csms-server.
 const STATION_TOPIC_RE = /^ospp\/v1\/stations\/(stn_[a-f0-9]{8,60})\/to-server$/;
 
 export type MqttConnector = (url: string, opts: IClientOptions) => MqttClient;

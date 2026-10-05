@@ -113,8 +113,10 @@ export interface IncomingEnvelope {
 - **`version`** (required) — `1`. See §1.
 - **`topic`** (required) — full topic string as observed by the bridge,
   matching the regex
-  `^ospp/v1/stations/stn_[a-f0-9]{8,60}/to-server$` (per the OSPP spec,
-  `01-architecture.md`, section 3.1 Identifier Format). Topics that don't match are
+  `^ospp/v1/stations/stn_[a-f0-9]{8,60}/to-server$`. The station id is the OSPP spec's:
+  `01-architecture.md`, section 3.1 Identifier Format, states `^stn_[a-f0-9]{8,}$`, and its
+  station-id schema (`schemas/common/station-id.schema.json`) bounds it at 64 characters,
+  `stn_` and 60 hex - the bound csms-server issues too. Topics that don't match are
   dropped with a `warn` log; they NEVER reach this queue.
 - **`stationId`** (required) — extracted from `topic`. Always equal to
   the captured group, including the `stn_` prefix. Provided
@@ -180,9 +182,11 @@ fields is worse than no shape at all.
 
 ## 5. Reliability semantics
 
-The bridge is at-least-once in both directions as of Phase 0.5. Workers
-MUST be prepared to see the same `messageId` more than once and dedupe
-via that field if their downstream side effects are not idempotent.
+The bridge is at-least-once on the one path it carries, inbound: since 0.2.0 removed
+the outbound one, what the application sends to stations goes over the EMQX REST
+API, as the README says. Workers MUST be prepared to see the same `messageId` more
+than once and dedupe via that field if their downstream side effects are not
+idempotent.
 
 ### Inbound: broker → bridge → Redis
 
