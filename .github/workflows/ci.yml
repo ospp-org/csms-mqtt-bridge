@@ -60,6 +60,11 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # CW137 (2026-10-05): `npm run format:check` failed on seven files at e6bd2d2 and 2be7197, and
+      # nothing reported it - this job ran lint, typecheck, test and build, and not this script.
+      - name: Format
+        run: npm run format:check
+
       - name: Typecheck
         run: npm run typecheck
 
